@@ -1,6 +1,7 @@
 const express = require('express');
-const servidor = express();
+const bd = require('./BD/base-datos');
 
+const servidor = express();
 servidor.use(express.json());
 
 // Controlador para la ruta de verificación de estado
