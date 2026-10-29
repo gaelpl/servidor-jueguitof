@@ -6,10 +6,41 @@ const bd = require('./BD/base-datos');
 const servidor = express();
 servidor.use(express.json());
 
-// Clave secreta para firmar los tokens (en un entorno de producción va en variables de entorno .env)
+// Clave secreta para firmar los tokens
 const CLAVE_SECRETA_JWT = 'clave_secreta_super_segura_123';
 
-// Controlador para la ruta de verificación de estado
+// ==========================================
+// MIDDLEWARES DE SEGURIDAD
+// ==========================================
+const verificarTokenJWT = (solicitud, respuesta, siguiente) => {
+    const cabeceraAuth = solicitud.headers['authorization'];
+    const token = cabeceraAuth && cabeceraAuth.split(' ')[1]; // Formato: "Bearer TOKEN"
+
+    if (!token) {
+        return respuesta.status(401).json({
+            estado: 'error',
+            mensaje: 'Acceso denegado. Token de autenticación requerido.'
+        });
+    }
+
+    jwt.verify(token, CLAVE_SECRETA_JWT, (error, usuarioDecodificado) => {
+        if (error) {
+            return respuesta.status(403).json({
+                estado: 'error',
+                mensaje: 'Token inválido o expirado.'
+            });
+        }
+
+        // Adjuntar los datos del usuario decodificados a la solicitud
+        solicitud.usuario = usuarioDecodificado;
+        siguiente();
+    });
+};
+
+// ==========================================
+// CONTROLADORES
+// ==========================================
+
 const manejarPruebaEstado = (solicitud, respuesta) => {
     respuesta.json({
         estado: 'exito',
@@ -17,7 +48,6 @@ const manejarPruebaEstado = (solicitud, respuesta) => {
     });
 };
 
-// Controlador para el registro de nuevos usuarios
 const manejarRegistroUsuario = async (solicitud, respuesta) => {
     try {
         const { correo, contrasena } = solicitud.body;
@@ -61,7 +91,6 @@ const manejarRegistroUsuario = async (solicitud, respuesta) => {
     }
 };
 
-// Controlador para el inicio de sesión (Login)
 const manejarInicioSesion = async (solicitud, respuesta) => {
     try {
         const { correo, contrasena } = solicitud.body;
@@ -82,7 +111,6 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
                 });
             }
 
-            // Validar si el usuario existe
             if (!usuario) {
                 return respuesta.status(401).json({
                     estado: 'error',
@@ -90,7 +118,6 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
                 });
             }
 
-            // Comparar la contraseña ingresada con el hash de la base de datos
             const esContrasenaValida = await bcrypt.compare(contrasena, usuario.contrasena);
             if (!esContrasenaValida) {
                 return respuesta.status(401).json({
@@ -99,7 +126,6 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
                 });
             }
 
-            // Generar el Token JWT con vigencia de 24 horas
             const token = jwt.sign(
                 { idUsuario: usuario.id, correo: usuario.correo },
                 CLAVE_SECRETA_JWT,
@@ -120,10 +146,47 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
     }
 };
 
-// Definición de rutas
+// Controlador para eliminar cuenta (Ruta protegida)
+const manejarEliminarCuenta = (solicitud, respuesta) => {
+    try {
+        const idUsuario = solicitud.usuario.idUsuario;
+
+        const consulta = `DELETE FROM usuarios WHERE id = ?`;
+        bd.run(consulta, [idUsuario], function (error) {
+            if (error) {
+                return respuesta.status(500).json({
+                    estado: 'error',
+                    mensaje: 'Error interno al eliminar la cuenta.'
+                });
+            }
+
+            if (this.changes === 0) {
+                return respuesta.status(404).json({
+                    estado: 'error',
+                    mensaje: 'Usuario no encontrado.'
+                });
+            }
+
+            return respuesta.status(200).json({
+                estado: 'exito',
+                mensaje: 'Cuenta eliminada exitosamente.'
+            });
+        });
+    } catch (error) {
+        return respuesta.status(500).json({
+            estado: 'error',
+            mensaje: 'Error en el servidor al eliminar la cuenta.'
+        });
+    }
+};
+
+// ==========================================
+// DEFINICIÓN DE RUTAS
+// ==========================================
 servidor.get('/ping', manejarPruebaEstado);
 servidor.post('/register', manejarRegistroUsuario);
 servidor.post('/login', manejarInicioSesion);
+servidor.delete('/account', verificarTokenJWT, manejarEliminarCuenta);
 
 // Iniciar servidor solo si se ejecuta directamente
 if (require.main === module) {
