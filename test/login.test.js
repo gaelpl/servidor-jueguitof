@@ -9,7 +9,7 @@ describe('Pruebas del Endpoint POST /login', () => {
         request(servidor)
             .post('/register')
             .send({
-                correo: 'login@test.com',
+                usuario: 'login_test',
                 contrasena: 'passwordLogin123'
             })
             .end(done);
@@ -17,14 +17,14 @@ describe('Pruebas del Endpoint POST /login', () => {
 
     // Limpiar el usuario de prueba al finalizar todas las pruebas de este bloque
     afterAll((done) => {
-        bd.run("DELETE FROM usuarios WHERE correo = 'login@test.com'", done);
+        bd.run("DELETE FROM usuarios WHERE usuario = 'login_test'", done);
     });
 
     it('debe iniciar sesion exitosamente y devolver un token JWT', async () => {
         const respuesta = await request(servidor)
             .post('/login')
             .send({
-                correo: 'login@test.com',
+                usuario: 'login_test',
                 contrasena: 'passwordLogin123'
             });
 
@@ -37,7 +37,7 @@ describe('Pruebas del Endpoint POST /login', () => {
         const respuesta = await request(servidor)
             .post('/login')
             .send({
-                correo: 'login@test.com',
+                usuario: 'login_test',
                 contrasena: 'passwordIncorrecto'
             });
 
@@ -45,11 +45,11 @@ describe('Pruebas del Endpoint POST /login', () => {
         expect(respuesta.body.estado).toBe('error');
     });
 
-    it('debe fallar si el correo no esta registrado', async () => {
+    it('debe fallar si el usuario no esta registrado', async () => {
         const respuesta = await request(servidor)
             .post('/login')
             .send({
-                correo: 'noexiste@test.com',
+                usuario: 'noexiste_test',
                 contrasena: 'passwordLogin123'
             });
 

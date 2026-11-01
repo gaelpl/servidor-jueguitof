@@ -14,10 +14,23 @@ bd.serialize(() => {
     bd.run(`
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            correo TEXT UNIQUE NOT NULL,
+            usuario TEXT UNIQUE NOT NULL,
             contrasena TEXT NOT NULL
         )
     `);
+
+    // Migrar bases de datos existentes que aún usan la columna "correo"
+    bd.all(`PRAGMA table_info(usuarios)`, (error, columnas) => {
+        if (error || !columnas) return;
+
+        const nombresColumnas = columnas.map((columna) => columna.name);
+        if (
+            nombresColumnas.includes('correo') &&
+            !nombresColumnas.includes('usuario')
+        ) {
+            bd.run(`ALTER TABLE usuarios RENAME COLUMN correo TO usuario`);
+        }
+    });
 });
 
 module.exports = bd;

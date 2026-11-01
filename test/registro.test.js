@@ -6,14 +6,14 @@ describe('Pruebas del Endpoint POST /register', () => {
 
     // Limpiar el usuario de prueba después de cada test
     afterEach((done) => {
-        bd.run("DELETE FROM usuarios WHERE correo = 'nuevo@test.com'", done);
+        bd.run("DELETE FROM usuarios WHERE usuario = 'nuevo_test'", done);
     });
 
     it('debe registrar un usuario exitosamente con codigo 201', async () => {
         const respuesta = await request(servidor)
             .post('/register')
             .send({
-                correo: 'nuevo@test.com',
+                usuario: 'nuevo_test',
                 contrasena: 'passwordSeguro123'
             });
 
@@ -22,20 +22,20 @@ describe('Pruebas del Endpoint POST /register', () => {
         expect(respuesta.body.idUsuario).toBeDefined();
     });
 
-    it('debe fallar si el correo ya se encuentra registrado', async () => {
+    it('debe fallar si el usuario ya se encuentra registrado', async () => {
         // Primer registro
         await request(servidor)
             .post('/register')
             .send({
-                correo: 'nuevo@test.com',
+                usuario: 'nuevo_test',
                 contrasena: 'passwordSeguro123'
             });
 
-        // Intentar registrar el mismo correo de nuevo
+        // Intentar registrar el mismo usuario de nuevo
         const respuestaDuplicada = await request(servidor)
             .post('/register')
             .send({
-                correo: 'nuevo@test.com',
+                usuario: 'nuevo_test',
                 contrasena: 'otroPassword'
             });
 

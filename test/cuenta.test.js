@@ -11,14 +11,14 @@ describe('Pruebas del Endpoint DELETE /account y Middleware de Seguridad', () =>
         await request(servidor)
             .post('/register')
             .send({
-                correo: 'borrar@test.com',
+                usuario: 'borrar_test',
                 contrasena: 'passwordBorrar123'
             });
 
         const respuestaLogin = await request(servidor)
             .post('/login')
             .send({
-                correo: 'borrar@test.com',
+                usuario: 'borrar_test',
                 contrasena: 'passwordBorrar123'
             });
 
@@ -26,7 +26,7 @@ describe('Pruebas del Endpoint DELETE /account y Middleware de Seguridad', () =>
     });
 
     afterAll((done) => {
-        bd.run("DELETE FROM usuarios WHERE correo = 'borrar@test.com'", done);
+        bd.run("DELETE FROM usuarios WHERE usuario = 'borrar_test'", done);
     });
 
     it('debe denegar el acceso si no se envia el token JWT', async () => {

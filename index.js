@@ -1,9 +1,11 @@
 const express = require('express');
+const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const bd = require('./BD/base-datos');
 
 const servidor = express();
+servidor.use(cors());
 servidor.use(express.json());
 
 // Clave secreta para firmar los tokens
@@ -38,6 +40,20 @@ const verificarTokenJWT = (solicitud, respuesta, siguiente) => {
 };
 
 // ==========================================
+// VALIDACIONES
+// ==========================================
+const NOMBRE_USUARIO_REGEX = /^[a-zA-Z0-9._-]+$/;
+
+const esNombreUsuarioValido = (usuario) => {
+    return (
+        typeof usuario === 'string' &&
+        usuario.length >= 3 &&
+        usuario.length <= 30 &&
+        NOMBRE_USUARIO_REGEX.test(usuario)
+    );
+};
+
+// ==========================================
 // CONTROLADORES
 // ==========================================
 
@@ -50,25 +66,35 @@ const manejarPruebaEstado = (solicitud, respuesta) => {
 
 const manejarRegistroUsuario = async (solicitud, respuesta) => {
     try {
-        const { correo, contrasena } = solicitud.body;
+        const { usuario, contrasena } = solicitud.body;
+        const usuarioNormalizado =
+            typeof usuario === 'string' ? usuario.trim() : usuario;
 
-        if (!correo || !contrasena) {
+        if (!usuarioNormalizado || !contrasena) {
             return respuesta.status(400).json({
                 estado: 'error',
-                mensaje: 'El correo y la contraseña son obligatorios.'
+                mensaje: 'El nombre de usuario y la contraseña son obligatorios.'
+            });
+        }
+
+        if (!esNombreUsuarioValido(usuarioNormalizado)) {
+            return respuesta.status(400).json({
+                estado: 'error',
+                mensaje:
+                    'El nombre de usuario debe tener entre 3 y 30 caracteres y solo puede contener letras, números, puntos, guiones y guiones bajos.'
             });
         }
 
         const saltRounds = 10;
         const contrasenaEncriptada = await bcrypt.hash(contrasena, saltRounds);
 
-        const consulta = `INSERT INTO usuarios (correo, contrasena) VALUES (?, ?)`;
-        bd.run(consulta, [correo, contrasenaEncriptada], function (error) {
+        const consulta = `INSERT INTO usuarios (usuario, contrasena) VALUES (?, ?)`;
+        bd.run(consulta, [usuarioNormalizado, contrasenaEncriptada], function (error) {
             if (error) {
                 if (error.message.includes('SQLITE_CONSTRAINT')) {
                     return respuesta.status(400).json({
                         estado: 'error',
-                        mensaje: 'El correo electrónico ya está registrado.'
+                        mensaje: 'El nombre de usuario ya está registrado.'
                     });
                 }
                 return respuesta.status(500).json({
@@ -93,17 +119,26 @@ const manejarRegistroUsuario = async (solicitud, respuesta) => {
 
 const manejarInicioSesion = async (solicitud, respuesta) => {
     try {
-        const { correo, contrasena } = solicitud.body;
+        const { usuario, contrasena } = solicitud.body;
+        const usuarioNormalizado =
+            typeof usuario === 'string' ? usuario.trim() : usuario;
 
-        if (!correo || !contrasena) {
+        if (!usuarioNormalizado || !contrasena) {
             return respuesta.status(400).json({
                 estado: 'error',
-                mensaje: 'El correo y la contraseña son obligatorios.'
+                mensaje: 'El nombre de usuario y la contraseña son obligatorios.'
             });
         }
 
-        const consulta = `SELECT * FROM usuarios WHERE correo = ?`;
-        bd.get(consulta, [correo], async (error, usuario) => {
+        if (!esNombreUsuarioValido(usuarioNormalizado)) {
+            return respuesta.status(400).json({
+                estado: 'error',
+                mensaje: 'El nombre de usuario no es válido.'
+            });
+        }
+
+        const consulta = `SELECT * FROM usuarios WHERE usuario = ?`;
+        bd.get(consulta, [usuarioNormalizado], async (error, usuarioEncontrado) => {
             if (error) {
                 return respuesta.status(500).json({
                     estado: 'error',
@@ -111,14 +146,17 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
                 });
             }
 
-            if (!usuario) {
+            if (!usuarioEncontrado) {
                 return respuesta.status(401).json({
                     estado: 'error',
                     mensaje: 'Credenciales inválidas.'
                 });
             }
 
-            const esContrasenaValida = await bcrypt.compare(contrasena, usuario.contrasena);
+            const esContrasenaValida = await bcrypt.compare(
+                contrasena,
+                usuarioEncontrado.contrasena
+            );
             if (!esContrasenaValida) {
                 return respuesta.status(401).json({
                     estado: 'error',
@@ -127,7 +165,10 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
             }
 
             const token = jwt.sign(
-                { idUsuario: usuario.id, correo: usuario.correo },
+                {
+                    idUsuario: usuarioEncontrado.id,
+                    usuario: usuarioEncontrado.usuario
+                },
                 CLAVE_SECRETA_JWT,
                 { expiresIn: '24h' }
             );
