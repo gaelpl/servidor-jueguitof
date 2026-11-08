@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const http = require('http');
+const { Server } = require('socket.io');
 const bd = require('./BD/base-datos');
 
 const servidor = express();
@@ -229,12 +231,56 @@ servidor.post('/register', manejarRegistroUsuario);
 servidor.post('/login', manejarInicioSesion);
 servidor.delete('/account', verificarTokenJWT, manejarEliminarCuenta);
 
+// ==========================================
+// SERVIDOR HTTP Y SOCKET.IO
+// ==========================================
+const servidorHttp = http.createServer(servidor);
+
+const io = new Server(servidorHttp, {
+    cors: {
+        origin: '*',
+        methods: ['GET', 'POST']
+    }
+});
+
+// Middleware de autenticación para Socket.io
+io.use((socket, siguiente) => {
+    const token = socket.handshake.auth && socket.handshake.auth.token;
+
+    if (!token) {
+        return siguiente(new Error('Acceso denegado. Token de autenticación requerido.'));
+    }
+
+    jwt.verify(token, CLAVE_SECRETA_JWT, (error, usuarioDecodificado) => {
+        if (error) {
+            return siguiente(new Error('Token inválido o expirado.'));
+        }
+
+        // Guardar los datos del usuario en el objeto socket
+        socket.usuario = usuarioDecodificado;
+        siguiente();
+    });
+});
+
+io.on('connection', (socket) => {
+    console.log(
+        `Usuario conectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario})`
+    );
+
+    socket.on('disconnect', (motivo) => {
+        console.log(
+            `Usuario desconectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario}). Motivo: ${motivo}`
+        );
+    });
+});
+
 // Iniciar servidor solo si se ejecuta directamente
 if (require.main === module) {
     const PUERTO = process.env.PUERTO || 3000;
-    servidor.listen(PUERTO, () => {
+    servidorHttp.listen(PUERTO, () => {
         console.log(`Servidor corriendo en el puerto ${PUERTO}`);
     });
 }
 
-module.exports = servidor;
+module.exports = servidorHttp;
+module.exports.io = io;
