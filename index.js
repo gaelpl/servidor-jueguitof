@@ -262,10 +262,90 @@ io.use((socket, siguiente) => {
     });
 });
 
+// ==========================================
+// GESTIÓN DE SALAS DE JUEGO (MEMORIA)
+// ==========================================
+const salas = new Map();
+
+const CARACTERES_CODIGO = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+const generarCodigoSala = () => {
+    let codigo;
+    do {
+        codigo = '';
+        for (let i = 0; i < 6; i++) {
+            codigo += CARACTERES_CODIGO.charAt(
+                Math.floor(Math.random() * CARACTERES_CODIGO.length)
+            );
+        }
+    } while (salas.has(codigo));
+    return codigo;
+};
+
 io.on('connection', (socket) => {
     console.log(
         `Usuario conectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario})`
     );
+
+    socket.on('crear_sala', () => {
+        const codigo = generarCodigoSala();
+
+        salas.set(codigo, {
+            codigo,
+            creador: socket.id,
+            jugadores: [
+                {
+                    socketId: socket.id,
+                    idUsuario: socket.usuario.idUsuario,
+                    usuario: socket.usuario.usuario
+                }
+            ]
+        });
+
+        socket.join(codigo);
+        socket.emit('sala_creada', codigo);
+
+        console.log(
+            `Sala ${codigo} creada por ${socket.usuario.usuario} (${socket.id})`
+        );
+    });
+
+    socket.on('unirse_sala', (codigo) => {
+        const codigoNormalizado =
+            typeof codigo === 'string' ? codigo.trim().toUpperCase() : codigo;
+        const sala = salas.get(codigoNormalizado);
+
+        if (!sala) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala no existe.'
+            });
+        }
+
+        if (sala.jugadores.length !== 1) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala está llena.'
+            });
+        }
+
+        socket.join(codigoNormalizado);
+        sala.jugadores.push({
+            socketId: socket.id,
+            idUsuario: socket.usuario.idUsuario,
+            usuario: socket.usuario.usuario
+        });
+
+        io.to(codigoNormalizado).emit('partida_lista', {
+            estado: 'exito',
+            codigo: codigoNormalizado,
+            jugadores: sala.jugadores
+        });
+
+        console.log(
+            `Usuario ${socket.usuario.usuario} (${socket.id}) se unió a la sala ${codigoNormalizado}`
+        );
+    });
 
     socket.on('disconnect', (motivo) => {
         console.log(
@@ -284,3 +364,4 @@ if (require.main === module) {
 
 module.exports = servidorHttp;
 module.exports.io = io;
+module.exports.salas = salas;
