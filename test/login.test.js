@@ -33,6 +33,23 @@ describe('Pruebas del Endpoint POST /login', () => {
         expect(respuesta.body.token).toBeDefined();
     });
 
+    it('debe iniciar sesion ignorando mayusculas, minusculas y espacios', async () => {
+        const variantes = ['LOGIN_TEST', 'Login_Test', '  login_test  '];
+
+        for (const usuario of variantes) {
+            const respuesta = await request(servidor)
+                .post('/login')
+                .send({
+                    usuario,
+                    contrasena: 'passwordLogin123'
+                });
+
+            expect(respuesta.statusCode).toBe(200);
+            expect(respuesta.body.estado).toBe('exito');
+            expect(respuesta.body.token).toBeDefined();
+        }
+    });
+
     it('debe fallar si la contraseña es incorrecta', async () => {
         const respuesta = await request(servidor)
             .post('/login')

@@ -55,6 +55,15 @@ const esNombreUsuarioValido = (usuario) => {
     );
 };
 
+const normalizarUsuario = (usuario) => {
+    if (typeof usuario !== 'string') return null;
+
+    const usuarioNormalizado = usuario.trim();
+    return esNombreUsuarioValido(usuarioNormalizado)
+        ? usuarioNormalizado
+        : null;
+};
+
 // ==========================================
 // CONTROLADORES
 // ==========================================
@@ -69,17 +78,16 @@ const manejarPruebaEstado = (solicitud, respuesta) => {
 const manejarRegistroUsuario = async (solicitud, respuesta) => {
     try {
         const { usuario, contrasena } = solicitud.body;
-        const usuarioNormalizado =
-            typeof usuario === 'string' ? usuario.trim() : usuario;
+        const usuarioNormalizado = normalizarUsuario(usuario);
 
-        if (!usuarioNormalizado || !contrasena) {
+        if (!usuario || !contrasena) {
             return respuesta.status(400).json({
                 estado: 'error',
                 mensaje: 'El nombre de usuario y la contraseña son obligatorios.'
             });
         }
 
-        if (!esNombreUsuarioValido(usuarioNormalizado)) {
+        if (!usuarioNormalizado) {
             return respuesta.status(400).json({
                 estado: 'error',
                 mensaje:
@@ -87,29 +95,53 @@ const manejarRegistroUsuario = async (solicitud, respuesta) => {
             });
         }
 
-        const saltRounds = 10;
-        const contrasenaEncriptada = await bcrypt.hash(contrasena, saltRounds);
-
-        const consulta = `INSERT INTO usuarios (usuario, contrasena) VALUES (?, ?)`;
-        bd.run(consulta, [usuarioNormalizado, contrasenaEncriptada], function (error) {
+        const consultaExistente = `SELECT id FROM usuarios WHERE LOWER(usuario) = LOWER(?)`;
+        bd.get(consultaExistente, [usuarioNormalizado], async (error, usuarioExistente) => {
             if (error) {
-                if (error.message.includes('SQLITE_CONSTRAINT')) {
-                    return respuesta.status(400).json({
-                        estado: 'error',
-                        mensaje: 'El nombre de usuario ya está registrado.'
-                    });
-                }
                 return respuesta.status(500).json({
                     estado: 'error',
                     mensaje: 'Error interno al registrar el usuario.'
                 });
             }
 
-            return respuesta.status(201).json({
-                estado: 'exito',
-                mensaje: 'Usuario registrado exitosamente',
-                idUsuario: this.lastID
-            });
+            if (usuarioExistente) {
+                return respuesta.status(400).json({
+                    estado: 'error',
+                    mensaje: 'El nombre de usuario ya está registrado.'
+                });
+            }
+
+            try {
+                const saltRounds = 10;
+                const contrasenaEncriptada = await bcrypt.hash(contrasena, saltRounds);
+
+                const consulta = `INSERT INTO usuarios (usuario, contrasena) VALUES (?, ?)`;
+                bd.run(consulta, [usuarioNormalizado, contrasenaEncriptada], function (errorInsercion) {
+                    if (errorInsercion) {
+                        if (errorInsercion.message.includes('SQLITE_CONSTRAINT')) {
+                            return respuesta.status(400).json({
+                                estado: 'error',
+                                mensaje: 'El nombre de usuario ya está registrado.'
+                            });
+                        }
+                        return respuesta.status(500).json({
+                            estado: 'error',
+                            mensaje: 'Error interno al registrar el usuario.'
+                        });
+                    }
+
+                    return respuesta.status(201).json({
+                        estado: 'exito',
+                        mensaje: 'Usuario registrado exitosamente',
+                        idUsuario: this.lastID
+                    });
+                });
+            } catch (errorEncriptacion) {
+                return respuesta.status(500).json({
+                    estado: 'error',
+                    mensaje: 'Error interno al registrar el usuario.'
+                });
+            }
         });
     } catch (error) {
         return respuesta.status(500).json({
@@ -122,24 +154,23 @@ const manejarRegistroUsuario = async (solicitud, respuesta) => {
 const manejarInicioSesion = async (solicitud, respuesta) => {
     try {
         const { usuario, contrasena } = solicitud.body;
-        const usuarioNormalizado =
-            typeof usuario === 'string' ? usuario.trim() : usuario;
+        const usuarioNormalizado = normalizarUsuario(usuario);
 
-        if (!usuarioNormalizado || !contrasena) {
+        if (!usuario || !contrasena) {
             return respuesta.status(400).json({
                 estado: 'error',
                 mensaje: 'El nombre de usuario y la contraseña son obligatorios.'
             });
         }
 
-        if (!esNombreUsuarioValido(usuarioNormalizado)) {
+        if (!usuarioNormalizado) {
             return respuesta.status(400).json({
                 estado: 'error',
                 mensaje: 'El nombre de usuario no es válido.'
             });
         }
 
-        const consulta = `SELECT * FROM usuarios WHERE usuario = ?`;
+        const consulta = `SELECT * FROM usuarios WHERE LOWER(usuario) = LOWER(?)`;
         bd.get(consulta, [usuarioNormalizado], async (error, usuarioEncontrado) => {
             if (error) {
                 return respuesta.status(500).json({

@@ -21,15 +21,41 @@ bd.serialize(() => {
 
     // Migrar bases de datos existentes que aún usan la columna "correo"
     bd.all(`PRAGMA table_info(usuarios)`, (error, columnas) => {
-        if (error || !columnas) return;
-
-        const nombresColumnas = columnas.map((columna) => columna.name);
-        if (
-            nombresColumnas.includes('correo') &&
-            !nombresColumnas.includes('usuario')
-        ) {
-            bd.run(`ALTER TABLE usuarios RENAME COLUMN correo TO usuario`);
+        if (!error && columnas) {
+            const nombresColumnas = columnas.map((columna) => columna.name);
+            if (
+                nombresColumnas.includes('correo') &&
+                !nombresColumnas.includes('usuario')
+            ) {
+                bd.run(`ALTER TABLE usuarios RENAME COLUMN correo TO usuario`);
+            }
         }
+
+        // Migración opcional: eliminar espacios accidentales de registros antiguos
+        bd.run(
+            `UPDATE usuarios SET usuario = TRIM(usuario) WHERE usuario <> TRIM(usuario)`,
+            (errorLimpieza) => {
+                if (errorLimpieza) {
+                    console.warn(
+                        'No se pudieron normalizar los usuarios existentes:',
+                        errorLimpieza.message
+                    );
+                }
+            }
+        );
+
+        // Índice único case-insensitive para evitar cuentas duplicadas
+        bd.run(
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_usuarios_usuario_nocase ON usuarios(LOWER(usuario))`,
+            (errorIndice) => {
+                if (errorIndice) {
+                    console.warn(
+                        'No se pudo crear el índice case-insensitive de usuarios:',
+                        errorIndice.message
+                    );
+                }
+            }
+        );
     });
 });
 
