@@ -6,8 +6,12 @@ const {
     crearSalaParaSocket,
     agregarJugadorASala,
     iniciarPartidaEnSala,
+    actualizarPuntuacionEnSala,
+    salirDeSala,
     construirPartidaLista,
-    construirSalaActualizada
+    construirSalaActualizada,
+    construirPuntuaciones,
+    construirPartidaGanada
 } = require('../index');
 
 const crearSocketFalso = (id, usuario = 'Jugador') => ({
@@ -110,5 +114,79 @@ describe('Salas multijugador', () => {
         expect(estado.iniciada).toBe(true);
         expect(estado.puntosParaGanar).toBe(26);
         expect(estado.jugadores).toHaveLength(2);
+    });
+
+    it('actualiza puntuaciones y declara ganador al alcanzar la meta', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        const actualizacion = actualizarPuntuacionEnSala(sala, 's2', 10);
+
+        expect(actualizacion.error).toBeNull();
+        expect(actualizacion.gano).toBe(false);
+        expect(sala.jugadores[1].puntuacion).toBe(10);
+
+        const victoria = actualizarPuntuacionEnSala(sala, 's2', 26);
+
+        expect(victoria.error).toBeNull();
+        expect(victoria.gano).toBe(true);
+        expect(victoria.ganador.usuario).toBe('Luis');
+        expect(sala.ganador.usuario).toBe('Luis');
+
+        const carga = construirPartidaGanada(sala);
+        expect(carga.ganador.usuario).toBe('Luis');
+        expect(carga.puntosParaGanar).toBe(26);
+        expect(construirPuntuaciones(sala).jugadores[1].puntuacion).toBe(26);
+    });
+
+    it('rechaza puntuaciones de jugadores ajenos o antes de iniciar', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+
+        expect(actualizarPuntuacionEnSala(sala, 's1', 5).error).toBe(
+            'La partida no ha iniciado.'
+        );
+        expect(actualizarPuntuacionEnSala(sala, 's9', 5).error).toBe(
+            'No perteneces a esta sala.'
+        );
+    });
+
+    it('mantiene la partida si un jugador sale de una sala de 3 o más', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        agregarJugadorASala(sala, crearSocketFalso('s3', 'Eva'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        const resultado = salirDeSala(sala, 's1');
+
+        expect(resultado.salaEliminada).toBe(false);
+        expect(resultado.ganador).toBeNull();
+        expect(resultado.anfitrion).toBe('s2');
+        expect(sala.jugadores).toHaveLength(2);
+        expect(sala.iniciada).toBe(true);
+    });
+
+    it('declara ganador al restante cuando sale el rival en una partida de 2', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        const resultado = salirDeSala(sala, 's2');
+
+        expect(resultado.ganador).not.toBeNull();
+        expect(resultado.ganador.usuario).toBe('Ana');
+        expect(sala.jugadores).toHaveLength(1);
+    });
+
+    it('declara ganador al último jugador que queda en una sala de 3', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        agregarJugadorASala(sala, crearSocketFalso('s3', 'Eva'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        expect(salirDeSala(sala, 's1').ganador).toBeNull();
+        expect(salirDeSala(sala, 's2').ganador.usuario).toBe('Eva');
+        expect(sala.jugadores).toHaveLength(1);
     });
 });

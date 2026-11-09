@@ -358,6 +358,7 @@ const crearSalaParaSocket = (socket) => {
         anfitrion: socket.id,
         iniciada: false,
         puntosParaGanar: null,
+        ganador: null,
         jugadores: [crearJugadorSala(socket)]
     };
 
@@ -409,11 +410,106 @@ const iniciarPartidaEnSala = (sala, socketId) => {
     return null;
 };
 
+const actualizarPuntuacionEnSala = (sala, socketId, puntuacion) => {
+    const jugador = buscarJugadorEnSala(sala, socketId);
+
+    if (!jugador) {
+        return { error: 'No perteneces a esta sala.', gano: false };
+    }
+
+    if (!sala.iniciada) {
+        return { error: 'La partida no ha iniciado.', gano: false };
+    }
+
+    if (sala.ganador) {
+        return { error: 'La partida ya terminó.', gano: false };
+    }
+
+    const valor = Number(puntuacion);
+    if (!Number.isFinite(valor)) {
+        return { error: 'Puntuación inválida.', gano: false };
+    }
+
+    jugador.puntuacion = Math.max(0, Math.trunc(valor));
+
+    if (jugador.puntuacion >= sala.puntosParaGanar) {
+        sala.ganador = {
+            socketId: jugador.socketId,
+            usuario: jugador.usuario,
+            puntuacion: jugador.puntuacion
+        };
+    }
+
+    return {
+        error: null,
+        gano: Boolean(sala.ganador),
+        ganador: sala.ganador
+    };
+};
+
+const salirDeSala = (sala, socketId) => {
+    const indice = sala.jugadores.findIndex(
+        (jugador) => jugador.socketId === socketId
+    );
+
+    if (indice === -1) return null;
+
+    const [jugador] = sala.jugadores.splice(indice, 1);
+
+    if (sala.jugadores.length === 0) {
+        salas.delete(sala.codigo);
+        return {
+            jugador,
+            salaEliminada: true,
+            ganador: null,
+            anfitrion: null
+        };
+    }
+
+    if (sala.anfitrion === socketId) {
+        sala.anfitrion = sala.jugadores[0].socketId;
+    }
+
+    let ganador = null;
+    if (sala.iniciada && !sala.ganador && sala.jugadores.length === 1) {
+        const restante = sala.jugadores[0];
+        sala.ganador = {
+            socketId: restante.socketId,
+            usuario: restante.usuario,
+            puntuacion: restante.puntuacion
+        };
+        ganador = sala.ganador;
+    }
+
+    return {
+        jugador,
+        salaEliminada: false,
+        ganador,
+        anfitrion: sala.anfitrion
+    };
+};
+
 const construirSalaActualizada = (sala) => ({
     codigo: sala.codigo,
     anfitrion: sala.anfitrion,
     jugadores: sala.jugadores,
     iniciada: sala.iniciada,
+    puntosParaGanar: sala.puntosParaGanar,
+    ganador: sala.ganador
+});
+
+const construirPuntuaciones = (sala) => ({
+    estado: 'exito',
+    codigo: sala.codigo,
+    jugadores: sala.jugadores,
+    puntosParaGanar: sala.puntosParaGanar
+});
+
+const construirPartidaGanada = (sala) => ({
+    estado: 'exito',
+    codigo: sala.codigo,
+    ganador: sala.ganador,
+    jugadores: sala.jugadores,
     puntosParaGanar: sala.puntosParaGanar
 });
 
@@ -431,6 +527,61 @@ const emitirSalaActualizada = (sala) => {
         'sala_actualizada',
         construirSalaActualizada(sala)
     );
+};
+
+const construirEventoSalida = (sala, jugador, anfitrion) => ({
+    estado: 'exito',
+    codigo: sala.codigo,
+    jugador,
+    anfitrion,
+    jugadores: sala.jugadores
+});
+
+const manejarSalidaJugador = (socket, codigoSala, motivo) => {
+    const codigo = normalizarCodigoSala(codigoSala);
+    const sala = buscarSala(codigo);
+
+    if (!sala) return;
+
+    const cantidadAntes = sala.jugadores.length;
+    const estabaIniciada = sala.iniciada;
+    const resultado = salirDeSala(sala, socket.id);
+
+    if (!resultado) return;
+
+    socket.leave(codigo);
+
+    if (resultado.salaEliminada) return;
+
+    const eventoSalida = construirEventoSalida(
+        sala,
+        resultado.jugador,
+        resultado.anfitrion
+    );
+
+    if (resultado.ganador) {
+        io.to(codigo).emit('partida_ganada', construirPartidaGanada(sala));
+
+        if (cantidadAntes === 2) {
+            if (motivo === 'concedio') {
+                socket.to(codigo).emit('rival_concedio');
+            } else {
+                socket.to(codigo).emit('rival_desconectado');
+            }
+        } else if (motivo === 'concedio') {
+            socket.to(codigo).emit('jugador_concedio', eventoSalida);
+        } else {
+            socket.to(codigo).emit('jugador_desconectado', eventoSalida);
+        }
+    } else if (estabaIniciada && cantidadAntes > 2) {
+        if (motivo === 'concedio') {
+            socket.to(codigo).emit('jugador_concedio', eventoSalida);
+        } else {
+            socket.to(codigo).emit('jugador_desconectado', eventoSalida);
+        }
+    }
+
+    emitirSalaActualizada(sala);
 };
 
 io.on('connection', (socket) => {
@@ -517,55 +668,68 @@ io.on('connection', (socket) => {
     });
 
     socket.on('movimiento_tablero', (datos, codigoSala) => {
-        const codigo = typeof codigoSala === 'string'
-            ? codigoSala.trim().toUpperCase()
-            : (datos && (datos.codigoSala || datos.sala));
+        const codigo = normalizarCodigoSala(codigoSala) ||
+            obtenerCodigoSala(datos);
 
         if (!codigo) return;
 
-        const sala = salas.get(codigo);
+        const sala = buscarSala(codigo);
         if (!sala) return;
 
-        const perteneceALaSala = sala.jugadores.some(
-            (jugador) => jugador.socketId === socket.id
-        );
-        if (!perteneceALaSala) return;
+        if (!buscarJugadorEnSala(sala, socket.id)) return;
 
         socket.to(codigo).emit('movimiento_recibido', datos);
     });
 
-    socket.on('conceder_partida', (codigoSala) => {
-        const codigo = typeof codigoSala === 'string'
-            ? codigoSala.trim().toUpperCase()
-            : null;
+    socket.on('puntuacion_actualizada', (datos) => {
+        const codigo = obtenerCodigoSala(datos);
+        const sala = buscarSala(codigo);
 
-        if (!codigo) return;
+        if (!sala) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala no existe.'
+            });
+        }
 
-        const sala = salas.get(codigo);
-        if (!sala) return;
-
-        const perteneceALaSala = sala.jugadores.some(
-            (jugador) => jugador.socketId === socket.id
+        const resultado = actualizarPuntuacionEnSala(
+            sala,
+            socket.id,
+            datos && datos.puntuacion
         );
-        if (!perteneceALaSala) return;
 
-        salas.delete(codigo);
-        socket.to(codigo).emit('rival_concedio');
-        socket.leave(codigo);
+        if (resultado.error) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: resultado.error
+            });
+        }
+
+        io.to(codigo).emit(
+            'puntuaciones_actualizadas',
+            construirPuntuaciones(sala)
+        );
+
+        if (resultado.gano) {
+            io.to(codigo).emit(
+                'partida_ganada',
+                construirPartidaGanada(sala)
+            );
+        }
+    });
+
+    socket.on('conceder_partida', (codigoSala) => {
+        manejarSalidaJugador(socket, codigoSala, 'concedio');
     });
 
     socket.on('disconnect', (motivo) => {
-        for (const [codigo, sala] of salas) {
-            const perteneceALaSala = sala.jugadores.some(
-                (jugador) => jugador.socketId === socket.id
-            );
+        const salasDelJugador = [...salas.values()].filter((sala) =>
+            buscarJugadorEnSala(sala, socket.id)
+        );
 
-            if (perteneceALaSala) {
-                salas.delete(codigo);
-                socket.to(codigo).emit('rival_desconectado');
-                break;
-            }
-        }
+        salasDelJugador.forEach((sala) => {
+            manejarSalidaJugador(socket, sala.codigo, 'desconectado');
+        });
 
         console.log(
             `Usuario desconectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario}). Motivo: ${motivo}`
@@ -594,5 +758,9 @@ module.exports.buscarSala = buscarSala;
 module.exports.buscarJugadorEnSala = buscarJugadorEnSala;
 module.exports.agregarJugadorASala = agregarJugadorASala;
 module.exports.iniciarPartidaEnSala = iniciarPartidaEnSala;
+module.exports.actualizarPuntuacionEnSala = actualizarPuntuacionEnSala;
+module.exports.salirDeSala = salirDeSala;
 module.exports.construirSalaActualizada = construirSalaActualizada;
 module.exports.construirPartidaLista = construirPartidaLista;
+module.exports.construirPuntuaciones = construirPuntuaciones;
+module.exports.construirPartidaGanada = construirPartidaGanada;
