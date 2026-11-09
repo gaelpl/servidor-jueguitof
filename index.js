@@ -386,6 +386,18 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', (motivo) => {
+        for (const [codigo, sala] of salas) {
+            const perteneceALaSala = sala.jugadores.some(
+                (jugador) => jugador.socketId === socket.id
+            );
+
+            if (perteneceALaSala) {
+                salas.delete(codigo);
+                socket.to(codigo).emit('rival_desconectado');
+                break;
+            }
+        }
+
         console.log(
             `Usuario desconectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario}). Motivo: ${motivo}`
         );
