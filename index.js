@@ -299,6 +299,8 @@ io.use((socket, siguiente) => {
 const salas = new Map();
 
 const CARACTERES_CODIGO = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const MAX_JUGADORES = 5;
+const MIN_JUGADORES = 2;
 
 const generarCodigoSala = () => {
     let codigo;
@@ -313,38 +315,144 @@ const generarCodigoSala = () => {
     return codigo;
 };
 
+const calcularPuntosParaGanar = (cantidadJugadores) => {
+    if (cantidadJugadores === 2) return 26;
+    if (cantidadJugadores === 3) return 24;
+    if (cantidadJugadores === 4) return 22;
+    if (cantidadJugadores === 5) return 20;
+    return null;
+};
+
+const normalizarCodigoSala = (codigo) => {
+    if (typeof codigo !== 'string') return null;
+
+    const codigoNormalizado = codigo.trim().toUpperCase();
+    return codigoNormalizado || null;
+};
+
+const obtenerCodigoSala = (datos) => {
+    if (typeof datos === 'string') {
+        return normalizarCodigoSala(datos);
+    }
+
+    if (datos && typeof datos === 'object') {
+        return normalizarCodigoSala(
+            datos.codigoSala || datos.sala || datos.codigo
+        );
+    }
+
+    return null;
+};
+
+const crearJugadorSala = (socket) => ({
+    socketId: socket.id,
+    idUsuario: socket.usuario.idUsuario,
+    usuario: socket.usuario.usuario,
+    puntuacion: 0
+});
+
+const crearSalaParaSocket = (socket) => {
+    const codigo = generarCodigoSala();
+    const sala = {
+        codigo,
+        anfitrion: socket.id,
+        iniciada: false,
+        puntosParaGanar: null,
+        jugadores: [crearJugadorSala(socket)]
+    };
+
+    salas.set(codigo, sala);
+    return sala;
+};
+
+const buscarSala = (codigo) => salas.get(normalizarCodigoSala(codigo));
+
+const buscarJugadorEnSala = (sala, socketId) =>
+    sala.jugadores.find((jugador) => jugador.socketId === socketId);
+
+const agregarJugadorASala = (sala, socket) => {
+    if (sala.iniciada) {
+        return 'La partida ya inició.';
+    }
+
+    if (sala.jugadores.length >= MAX_JUGADORES) {
+        return 'La sala está llena.';
+    }
+
+    if (buscarJugadorEnSala(sala, socket.id)) {
+        return 'Ya estás en esta sala.';
+    }
+
+    sala.jugadores.push(crearJugadorSala(socket));
+    return null;
+};
+
+const iniciarPartidaEnSala = (sala, socketId) => {
+    if (sala.anfitrion !== socketId) {
+        return 'Solo el anfitrión puede iniciar la partida.';
+    }
+
+    if (sala.iniciada) {
+        return 'La partida ya inició.';
+    }
+
+    if (sala.jugadores.length < MIN_JUGADORES) {
+        return 'Se necesitan al menos 2 jugadores para iniciar.';
+    }
+
+    sala.iniciada = true;
+    sala.puntosParaGanar = calcularPuntosParaGanar(sala.jugadores.length);
+    sala.jugadores.forEach((jugador) => {
+        jugador.puntuacion = 0;
+    });
+
+    return null;
+};
+
+const construirSalaActualizada = (sala) => ({
+    codigo: sala.codigo,
+    anfitrion: sala.anfitrion,
+    jugadores: sala.jugadores,
+    iniciada: sala.iniciada,
+    puntosParaGanar: sala.puntosParaGanar
+});
+
+const construirPartidaLista = (sala, socketId) => ({
+    estado: 'exito',
+    codigo: sala.codigo,
+    jugadores: sala.jugadores,
+    anfitrion: sala.anfitrion,
+    puntosParaGanar: sala.puntosParaGanar,
+    tuSocketId: socketId
+});
+
+const emitirSalaActualizada = (sala) => {
+    io.to(sala.codigo).emit(
+        'sala_actualizada',
+        construirSalaActualizada(sala)
+    );
+};
+
 io.on('connection', (socket) => {
     console.log(
         `Usuario conectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario})`
     );
 
     socket.on('crear_sala', () => {
-        const codigo = generarCodigoSala();
+        const sala = crearSalaParaSocket(socket);
 
-        salas.set(codigo, {
-            codigo,
-            creador: socket.id,
-            jugadores: [
-                {
-                    socketId: socket.id,
-                    idUsuario: socket.usuario.idUsuario,
-                    usuario: socket.usuario.usuario
-                }
-            ]
-        });
-
-        socket.join(codigo);
-        socket.emit('sala_creada', codigo);
+        socket.join(sala.codigo);
+        socket.emit('sala_creada', sala.codigo);
+        emitirSalaActualizada(sala);
 
         console.log(
-            `Sala ${codigo} creada por ${socket.usuario.usuario} (${socket.id})`
+            `Sala ${sala.codigo} creada por ${socket.usuario.usuario} (${socket.id})`
         );
     });
 
-    socket.on('unirse_sala', (codigo) => {
-        const codigoNormalizado =
-            typeof codigo === 'string' ? codigo.trim().toUpperCase() : codigo;
-        const sala = salas.get(codigoNormalizado);
+    socket.on('unirse_sala', (datos) => {
+        const codigo = obtenerCodigoSala(datos);
+        const sala = buscarSala(codigo);
 
         if (!sala) {
             return socket.emit('error_sala', {
@@ -353,28 +461,58 @@ io.on('connection', (socket) => {
             });
         }
 
-        if (sala.jugadores.length !== 1) {
+        const error = agregarJugadorASala(sala, socket);
+        if (error) {
             return socket.emit('error_sala', {
                 estado: 'error',
-                mensaje: 'La sala está llena.'
+                mensaje: error
             });
         }
 
-        socket.join(codigoNormalizado);
-        sala.jugadores.push({
-            socketId: socket.id,
-            idUsuario: socket.usuario.idUsuario,
-            usuario: socket.usuario.usuario
-        });
-
-        io.to(codigoNormalizado).emit('partida_lista', {
-            estado: 'exito',
-            codigo: codigoNormalizado,
-            jugadores: sala.jugadores
-        });
+        socket.join(sala.codigo);
+        emitirSalaActualizada(sala);
 
         console.log(
-            `Usuario ${socket.usuario.usuario} (${socket.id}) se unió a la sala ${codigoNormalizado}`
+            `Usuario ${socket.usuario.usuario} (${socket.id}) se unió a la sala ${sala.codigo}`
+        );
+    });
+
+    socket.on('iniciar_partida', (datos) => {
+        const codigo = obtenerCodigoSala(datos);
+        const sala = buscarSala(codigo);
+
+        if (!sala) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala no existe.'
+            });
+        }
+
+        if (!buscarJugadorEnSala(sala, socket.id)) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'No perteneces a esta sala.'
+            });
+        }
+
+        const error = iniciarPartidaEnSala(sala, socket.id);
+        if (error) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: error
+            });
+        }
+
+        sala.jugadores.forEach((jugador) => {
+            io.to(jugador.socketId).emit(
+                'partida_lista',
+                construirPartidaLista(sala, jugador.socketId)
+            );
+        });
+        emitirSalaActualizada(sala);
+
+        console.log(
+            `Partida iniciada en la sala ${sala.codigo} por ${socket.usuario.usuario}`
         );
     });
 
@@ -446,3 +584,15 @@ if (require.main === module) {
 module.exports = servidorHttp;
 module.exports.io = io;
 module.exports.salas = salas;
+module.exports.MAX_JUGADORES = MAX_JUGADORES;
+module.exports.MIN_JUGADORES = MIN_JUGADORES;
+module.exports.calcularPuntosParaGanar = calcularPuntosParaGanar;
+module.exports.normalizarCodigoSala = normalizarCodigoSala;
+module.exports.obtenerCodigoSala = obtenerCodigoSala;
+module.exports.crearSalaParaSocket = crearSalaParaSocket;
+module.exports.buscarSala = buscarSala;
+module.exports.buscarJugadorEnSala = buscarJugadorEnSala;
+module.exports.agregarJugadorASala = agregarJugadorASala;
+module.exports.iniciarPartidaEnSala = iniciarPartidaEnSala;
+module.exports.construirSalaActualizada = construirSalaActualizada;
+module.exports.construirPartidaLista = construirPartidaLista;
