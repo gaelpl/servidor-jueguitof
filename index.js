@@ -365,6 +365,26 @@ io.on('connection', (socket) => {
         socket.to(codigo).emit('movimiento_recibido', datos);
     });
 
+    socket.on('conceder_partida', (codigoSala) => {
+        const codigo = typeof codigoSala === 'string'
+            ? codigoSala.trim().toUpperCase()
+            : null;
+
+        if (!codigo) return;
+
+        const sala = salas.get(codigo);
+        if (!sala) return;
+
+        const perteneceALaSala = sala.jugadores.some(
+            (jugador) => jugador.socketId === socket.id
+        );
+        if (!perteneceALaSala) return;
+
+        salas.delete(codigo);
+        socket.to(codigo).emit('rival_concedio');
+        socket.leave(codigo);
+    });
+
     socket.on('disconnect', (motivo) => {
         console.log(
             `Usuario desconectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario}). Motivo: ${motivo}`
