@@ -410,8 +410,8 @@ const iniciarPartidaEnSala = (sala, socketId) => {
     return null;
 };
 
-const actualizarPuntuacionEnSala = (sala, socketId, puntuacion) => {
-    const jugador = buscarJugadorEnSala(sala, socketId);
+const actualizarPuntuacionEnSala = (sala, idSocket, puntuacion) => {
+    const jugador = buscarJugadorEnSala(sala, idSocket);
 
     if (!jugador) {
         return { error: 'No perteneces a esta sala.', gano: false };
@@ -447,9 +447,17 @@ const actualizarPuntuacionEnSala = (sala, socketId, puntuacion) => {
     };
 };
 
-const salirDeSala = (sala, socketId) => {
+const transferirAnfitrion = (sala, idSocketSaliente) => {
+    if (sala.anfitrion !== idSocketSaliente) return;
+
+    sala.anfitrion = sala.jugadores.length > 0
+        ? sala.jugadores[0].socketId
+        : null;
+};
+
+const salirDeSala = (sala, idSocket) => {
     const indice = sala.jugadores.findIndex(
-        (jugador) => jugador.socketId === socketId
+        (jugador) => jugador.socketId === idSocket
     );
 
     if (indice === -1) return null;
@@ -466,9 +474,7 @@ const salirDeSala = (sala, socketId) => {
         };
     }
 
-    if (sala.anfitrion === socketId) {
-        sala.anfitrion = sala.jugadores[0].socketId;
-    }
+    transferirAnfitrion(sala, idSocket);
 
     let ganador = null;
     if (sala.iniciada && !sala.ganador && sala.jugadores.length === 1) {
@@ -537,7 +543,7 @@ const construirEventoSalida = (sala, jugador, anfitrion) => ({
     jugadores: sala.jugadores
 });
 
-const manejarSalidaJugador = (socket, codigoSala, motivo) => {
+const manejarSalidaJugador = (conexion, codigoSala, motivo) => {
     const codigo = normalizarCodigoSala(codigoSala);
     const sala = buscarSala(codigo);
 
@@ -545,11 +551,11 @@ const manejarSalidaJugador = (socket, codigoSala, motivo) => {
 
     const cantidadAntes = sala.jugadores.length;
     const estabaIniciada = sala.iniciada;
-    const resultado = salirDeSala(sala, socket.id);
+    const resultado = salirDeSala(sala, conexion.id);
 
     if (!resultado) return;
 
-    socket.leave(codigo);
+    conexion.leave(codigo);
 
     if (resultado.salaEliminada) return;
 
@@ -564,20 +570,20 @@ const manejarSalidaJugador = (socket, codigoSala, motivo) => {
 
         if (cantidadAntes === 2) {
             if (motivo === 'concedio') {
-                socket.to(codigo).emit('rival_concedio');
+                conexion.to(codigo).emit('rival_concedio');
             } else {
-                socket.to(codigo).emit('rival_desconectado');
+                conexion.to(codigo).emit('rival_desconectado');
             }
         } else if (motivo === 'concedio') {
-            socket.to(codigo).emit('jugador_concedio', eventoSalida);
+            conexion.to(codigo).emit('jugador_concedio', eventoSalida);
         } else {
-            socket.to(codigo).emit('jugador_desconectado', eventoSalida);
+            conexion.to(codigo).emit('jugador_desconectado', eventoSalida);
         }
     } else if (estabaIniciada && cantidadAntes > 2) {
         if (motivo === 'concedio') {
-            socket.to(codigo).emit('jugador_concedio', eventoSalida);
+            conexion.to(codigo).emit('jugador_concedio', eventoSalida);
         } else {
-            socket.to(codigo).emit('jugador_desconectado', eventoSalida);
+            conexion.to(codigo).emit('jugador_desconectado', eventoSalida);
         }
     }
 
