@@ -673,20 +673,6 @@ io.on('connection', (socket) => {
         );
     });
 
-    socket.on('movimiento_tablero', (datos, codigoSala) => {
-        const codigo = normalizarCodigoSala(codigoSala) ||
-            obtenerCodigoSala(datos);
-
-        if (!codigo) return;
-
-        const sala = buscarSala(codigo);
-        if (!sala) return;
-
-        if (!buscarJugadorEnSala(sala, socket.id)) return;
-
-        socket.to(codigo).emit('movimiento_recibido', datos);
-    });
-
     socket.on('puntuacion_actualizada', (datos) => {
         const codigo = obtenerCodigoSala(datos);
         const sala = buscarSala(codigo);
