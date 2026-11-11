@@ -6,6 +6,11 @@ const {
     crearSalaParaSocket,
     agregarJugadorASala,
     iniciarPartidaEnSala,
+    lanzarDadosEnSala,
+    registrarAccionTurnoEnSala,
+    finalizarRondaEnSala,
+    finalizarRondaPorTiempo,
+    SEGUNDOS_POR_RONDA,
     actualizarPuntuacionEnSala,
     salirDeSala,
     construirPartidaLista,
@@ -127,12 +132,16 @@ describe('Salas multijugador', () => {
         expect(actualizacion.gano).toBe(false);
         expect(sala.jugadores[1].puntuacion).toBe(10);
 
+        sala.temporizadorRonda = setTimeout(() => {}, 60000);
+        sala.temporizadorRonda.unref();
+
         const victoria = actualizarPuntuacionEnSala(sala, 's2', 26);
 
         expect(victoria.error).toBeNull();
         expect(victoria.gano).toBe(true);
         expect(victoria.ganador.usuario).toBe('Luis');
         expect(sala.ganador.usuario).toBe('Luis');
+        expect(sala.temporizadorRonda).toBeNull();
 
         const carga = construirPartidaGanada(sala);
         expect(carga.ganador.usuario).toBe('Luis');
@@ -188,5 +197,97 @@ describe('Salas multijugador', () => {
         expect(salirDeSala(sala, 's1').ganador).toBeNull();
         expect(salirDeSala(sala, 's2').ganador.usuario).toBe('Eva');
         expect(sala.jugadores).toHaveLength(1);
+    });
+
+    it('solo el anfitrión lanza los dados y transmite valores sincronizados', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        expect(lanzarDadosEnSala(sala, 's2').error).toBe(
+            'Solo el anfitrión puede lanzar los dados.'
+        );
+
+        const random = jest
+            .fn()
+            .mockReturnValueOnce(0)
+            .mockReturnValueOnce(0.99);
+        const resultado = lanzarDadosEnSala(sala, 's1', random);
+
+        expect(resultado.error).toBeNull();
+        expect(resultado.evento.dado1).toBe(1);
+        expect(resultado.evento.dado2).toBe(6);
+        expect(resultado.evento.numeroRonda).toBe(1);
+        expect(resultado.evento.anfitrion).toBe('s1');
+        expect(resultado.evento.duracionRondaSegundos).toBe(
+            SEGUNDOS_POR_RONDA
+        );
+        expect(resultado.evento.segundosRestantes).toBe(SEGUNDOS_POR_RONDA);
+        expect(sala.dadosRonda).not.toBeNull();
+
+        expect(lanzarDadosEnSala(sala, 's1').error).toBe(
+            'La ronda actual aún no ha terminado.'
+        );
+    });
+
+    it('registra una acción por jugador y cierra la ronda al completarse', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+        lanzarDadosEnSala(sala, 's1', () => 0);
+
+        const primera = registrarAccionTurnoEnSala(sala, 's1');
+        expect(primera.error).toBeNull();
+        expect(primera.rondaCompleta).toBe(false);
+
+        expect(registrarAccionTurnoEnSala(sala, 's1').error).toBe(
+            'Ya completaste tu acción en esta ronda.'
+        );
+
+        const segunda = registrarAccionTurnoEnSala(sala, 's2');
+        expect(segunda.error).toBeNull();
+        expect(segunda.rondaCompleta).toBe(true);
+
+        const evento = finalizarRondaEnSala(sala, 'completada');
+        expect(evento.motivo).toBe('completada');
+        expect(evento.numeroRonda).toBe(1);
+        expect(evento.anfitrion).toBe('s1');
+        expect(sala.dadosRonda).toBeNull();
+        expect(sala.accionesTurno.size).toBe(0);
+
+        const siguiente = lanzarDadosEnSala(sala, 's1', () => 0);
+        expect(siguiente.error).toBeNull();
+        expect(siguiente.evento.numeroRonda).toBe(2);
+    });
+
+    it('rechaza acciones antes de lanzar dados y de jugadores ajenos', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        expect(registrarAccionTurnoEnSala(sala, 's1').error).toBe(
+            'Debes esperar el lanzamiento de dados del anfitrión.'
+        );
+
+        lanzarDadosEnSala(sala, 's1', () => 0);
+
+        expect(registrarAccionTurnoEnSala(sala, 's9').error).toBe(
+            'No perteneces a esta sala.'
+        );
+    });
+
+    it('salta automáticamente las acciones pendientes al agotarse el tiempo', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+        lanzarDadosEnSala(sala, 's1', () => 0);
+        registrarAccionTurnoEnSala(sala, 's1');
+
+        const evento = finalizarRondaPorTiempo(sala);
+
+        expect(evento.motivo).toBe('tiempo');
+        expect(evento.numeroRonda).toBe(1);
+        expect(sala.dadosRonda).toBeNull();
+        expect(sala.accionesTurno.size).toBe(0);
     });
 });

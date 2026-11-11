@@ -301,6 +301,8 @@ const salas = new Map();
 const CARACTERES_CODIGO = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const MAX_JUGADORES = 5;
 const MIN_JUGADORES = 2;
+const SEGUNDOS_POR_RONDA = 300;
+const MILISEGUNDOS_POR_RONDA = SEGUNDOS_POR_RONDA * 1000;
 
 const generarCodigoSala = () => {
     let codigo;
@@ -359,7 +361,11 @@ const crearSalaParaSocket = (socket) => {
         iniciada: false,
         puntosParaGanar: null,
         ganador: null,
-        jugadores: [crearJugadorSala(socket)]
+        jugadores: [crearJugadorSala(socket)],
+        numeroRonda: 0,
+        dadosRonda: null,
+        accionesTurno: new Set(),
+        temporizadorRonda: null
     };
 
     salas.set(codigo, sala);
@@ -370,6 +376,56 @@ const buscarSala = (codigo) => salas.get(normalizarCodigoSala(codigo));
 
 const buscarJugadorEnSala = (sala, socketId) =>
     sala.jugadores.find((jugador) => jugador.socketId === socketId);
+
+const detenerTemporizadorRonda = (sala) => {
+    if (!sala || !sala.temporizadorRonda) return;
+
+    clearTimeout(sala.temporizadorRonda);
+    sala.temporizadorRonda = null;
+};
+
+const construirDadosLanzados = (sala) => ({
+    estado: 'exito',
+    codigo: sala.codigo,
+    dado1: sala.dadosRonda.dado1,
+    dado2: sala.dadosRonda.dado2,
+    numeroRonda: sala.numeroRonda,
+    anfitrion: sala.anfitrion,
+    inicioRonda: sala.dadosRonda.inicioRonda,
+    duracionRondaSegundos: SEGUNDOS_POR_RONDA,
+    segundosRestantes: SEGUNDOS_POR_RONDA
+});
+
+const construirRondaLista = (sala, motivo) => ({
+    estado: 'exito',
+    codigo: sala.codigo,
+    numeroRonda: sala.numeroRonda,
+    anfitrion: sala.anfitrion,
+    jugadores: sala.jugadores,
+    puntosParaGanar: sala.puntosParaGanar,
+    motivo
+});
+
+const finalizarRondaEnSala = (sala, motivo = 'completada') => {
+    if (!sala || !sala.dadosRonda) return null;
+
+    const evento = construirRondaLista(sala, motivo);
+    detenerTemporizadorRonda(sala);
+    sala.dadosRonda = null;
+    sala.accionesTurno.clear();
+
+    return evento;
+};
+
+const finalizarRondaPorTiempo = (sala) => {
+    if (!sala || !sala.dadosRonda || sala.ganador) return null;
+
+    sala.jugadores.forEach((jugador) => {
+        sala.accionesTurno.add(jugador.socketId);
+    });
+
+    return finalizarRondaEnSala(sala, 'tiempo');
+};
 
 const agregarJugadorASala = (sala, socket) => {
     if (sala.iniciada) {
@@ -403,11 +459,96 @@ const iniciarPartidaEnSala = (sala, socketId) => {
 
     sala.iniciada = true;
     sala.puntosParaGanar = calcularPuntosParaGanar(sala.jugadores.length);
+    sala.numeroRonda = 0;
+    sala.dadosRonda = null;
+    sala.accionesTurno.clear();
+    detenerTemporizadorRonda(sala);
     sala.jugadores.forEach((jugador) => {
         jugador.puntuacion = 0;
     });
 
     return null;
+};
+
+const lanzarDadosEnSala = (sala, socketId, random = Math.random) => {
+    if (!sala) {
+        return { error: 'La sala no existe.', evento: null };
+    }
+
+    if (sala.anfitrion !== socketId) {
+        return {
+            error: 'Solo el anfitrión puede lanzar los dados.',
+            evento: null
+        };
+    }
+
+    if (!sala.iniciada) {
+        return { error: 'La partida no ha iniciado.', evento: null };
+    }
+
+    if (sala.ganador) {
+        return { error: 'La partida ya terminó.', evento: null };
+    }
+
+    if (sala.dadosRonda) {
+        return {
+            error: 'La ronda actual aún no ha terminado.',
+            evento: null
+        };
+    }
+
+    const dado1 = Math.floor(random() * 6) + 1;
+    const dado2 = Math.floor(random() * 6) + 1;
+
+    sala.numeroRonda += 1;
+    sala.accionesTurno.clear();
+    sala.dadosRonda = {
+        dado1,
+        dado2,
+        inicioRonda: Date.now()
+    };
+
+    return { error: null, evento: construirDadosLanzados(sala) };
+};
+
+const registrarAccionTurnoEnSala = (sala, socketId) => {
+    const jugador = sala ? buscarJugadorEnSala(sala, socketId) : null;
+
+    if (!jugador) {
+        return { error: 'No perteneces a esta sala.', rondaCompleta: false };
+    }
+
+    if (!sala.iniciada) {
+        return { error: 'La partida no ha iniciado.', rondaCompleta: false };
+    }
+
+    if (sala.ganador) {
+        return { error: 'La partida ya terminó.', rondaCompleta: false };
+    }
+
+    if (!sala.dadosRonda) {
+        return {
+            error: 'Debes esperar el lanzamiento de dados del anfitrión.',
+            rondaCompleta: false
+        };
+    }
+
+    if (sala.accionesTurno.has(socketId)) {
+        return {
+            error: 'Ya completaste tu acción en esta ronda.',
+            rondaCompleta: false
+        };
+    }
+
+    sala.accionesTurno.add(socketId);
+
+    const rondaCompleta =
+        sala.jugadores.length > 0 &&
+        sala.jugadores.every((jugadorSala) =>
+            sala.accionesTurno.has(jugadorSala.socketId)
+        );
+
+    return { error: null, rondaCompleta };
 };
 
 const actualizarPuntuacionEnSala = (sala, idSocket, puntuacion) => {
@@ -438,6 +579,7 @@ const actualizarPuntuacionEnSala = (sala, idSocket, puntuacion) => {
             usuario: jugador.usuario,
             puntuacion: jugador.puntuacion
         };
+        detenerTemporizadorRonda(sala);
     }
 
     return {
@@ -463,8 +605,10 @@ const salirDeSala = (sala, idSocket) => {
     if (indice === -1) return null;
 
     const [jugador] = sala.jugadores.splice(indice, 1);
+    sala.accionesTurno.delete(idSocket);
 
     if (sala.jugadores.length === 0) {
+        detenerTemporizadorRonda(sala);
         salas.delete(sala.codigo);
         return {
             jugador,
@@ -484,6 +628,7 @@ const salirDeSala = (sala, idSocket) => {
             usuario: restante.usuario,
             puntuacion: restante.puntuacion
         };
+        detenerTemporizadorRonda(sala);
         ganador = sala.ganador;
     }
 
@@ -565,6 +710,17 @@ const manejarSalidaJugador = (conexion, codigoSala, motivo) => {
         resultado.anfitrion
     );
 
+    let eventoRonda = null;
+    if (
+        !resultado.ganador &&
+        sala.dadosRonda &&
+        sala.jugadores.every((jugadorSala) =>
+            sala.accionesTurno.has(jugadorSala.socketId)
+        )
+    ) {
+        eventoRonda = finalizarRondaEnSala(sala, 'jugador-salio');
+    }
+
     if (resultado.ganador) {
         io.to(codigo).emit('partida_ganada', construirPartidaGanada(sala));
 
@@ -587,7 +743,33 @@ const manejarSalidaJugador = (conexion, codigoSala, motivo) => {
         }
     }
 
+    if (eventoRonda) {
+        io.to(codigo).emit('ronda_lista', eventoRonda);
+    }
+
     emitirSalaActualizada(sala);
+};
+
+const programarTemporizadorRonda = (sala) => {
+    if (!sala) return;
+
+    detenerTemporizadorRonda(sala);
+    sala.temporizadorRonda = setTimeout(() => {
+        sala.temporizadorRonda = null;
+
+        if (!salas.has(sala.codigo) || !sala.dadosRonda || sala.ganador) {
+            return;
+        }
+
+        const evento = finalizarRondaPorTiempo(sala);
+        if (evento) {
+            io.to(sala.codigo).emit('ronda_lista', evento);
+        }
+    }, MILISEGUNDOS_POR_RONDA);
+
+    if (typeof sala.temporizadorRonda.unref === 'function') {
+        sala.temporizadorRonda.unref();
+    }
 };
 
 io.on('connection', (socket) => {
@@ -673,6 +855,63 @@ io.on('connection', (socket) => {
         );
     });
 
+    socket.on('lanzar_dados', (datos) => {
+        const codigo = obtenerCodigoSala(datos);
+        const sala = buscarSala(codigo);
+
+        if (!sala) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala no existe.'
+            });
+        }
+
+        if (!buscarJugadorEnSala(sala, socket.id)) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'No perteneces a esta sala.'
+            });
+        }
+
+        const resultado = lanzarDadosEnSala(sala, socket.id);
+        if (resultado.error) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: resultado.error
+            });
+        }
+
+        programarTemporizadorRonda(sala);
+        io.to(codigo).emit('dados_lanzados', resultado.evento);
+    });
+
+    socket.on('accion_turno_completada', (datos) => {
+        const codigo = obtenerCodigoSala(datos);
+        const sala = buscarSala(codigo);
+
+        if (!sala) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala no existe.'
+            });
+        }
+
+        const resultado = registrarAccionTurnoEnSala(sala, socket.id);
+        if (resultado.error) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: resultado.error
+            });
+        }
+
+        if (resultado.rondaCompleta) {
+            const evento = finalizarRondaEnSala(sala, 'completada');
+            if (evento) {
+                io.to(codigo).emit('ronda_lista', evento);
+            }
+        }
+    });
+
     socket.on('puntuacion_actualizada', (datos) => {
         const codigo = obtenerCodigoSala(datos);
         const sala = buscarSala(codigo);
@@ -750,6 +989,14 @@ module.exports.buscarSala = buscarSala;
 module.exports.buscarJugadorEnSala = buscarJugadorEnSala;
 module.exports.agregarJugadorASala = agregarJugadorASala;
 module.exports.iniciarPartidaEnSala = iniciarPartidaEnSala;
+module.exports.lanzarDadosEnSala = lanzarDadosEnSala;
+module.exports.registrarAccionTurnoEnSala = registrarAccionTurnoEnSala;
+module.exports.finalizarRondaEnSala = finalizarRondaEnSala;
+module.exports.finalizarRondaPorTiempo = finalizarRondaPorTiempo;
+module.exports.construirDadosLanzados = construirDadosLanzados;
+module.exports.construirRondaLista = construirRondaLista;
+module.exports.programarTemporizadorRonda = programarTemporizadorRonda;
+module.exports.SEGUNDOS_POR_RONDA = SEGUNDOS_POR_RONDA;
 module.exports.actualizarPuntuacionEnSala = actualizarPuntuacionEnSala;
 module.exports.salirDeSala = salirDeSala;
 module.exports.construirSalaActualizada = construirSalaActualizada;
