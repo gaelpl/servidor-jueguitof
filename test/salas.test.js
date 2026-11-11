@@ -16,7 +16,9 @@ const {
     construirPartidaLista,
     construirSalaActualizada,
     construirPuntuaciones,
-    construirPartidaGanada
+    construirPartidaGanada,
+    marcarJugadorListoEnSala,
+    construirEstadoListos
 } = require('../index');
 
 const crearSocketFalso = (id, usuario = 'Jugador') => ({
@@ -26,6 +28,12 @@ const crearSocketFalso = (id, usuario = 'Jugador') => ({
         usuario
     }
 });
+
+const marcarTodosListos = (sala) => {
+    sala.jugadores.forEach((jugador) => {
+        marcarJugadorListoEnSala(sala, jugador.socketId);
+    });
+};
 
 describe('Salas multijugador', () => {
     afterEach(() => {
@@ -203,6 +211,7 @@ describe('Salas multijugador', () => {
         const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
         agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
         iniciarPartidaEnSala(sala, 's1');
+        marcarTodosListos(sala);
 
         expect(lanzarDadosEnSala(sala, 's2').error).toBe(
             'Solo el anfitrión puede lanzar los dados.'
@@ -234,6 +243,7 @@ describe('Salas multijugador', () => {
         const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
         agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
         iniciarPartidaEnSala(sala, 's1');
+        marcarTodosListos(sala);
         lanzarDadosEnSala(sala, 's1', () => 0);
 
         const primera = registrarAccionTurnoEnSala(sala, 's1');
@@ -269,6 +279,7 @@ describe('Salas multijugador', () => {
             'Debes esperar el lanzamiento de dados del anfitrión.'
         );
 
+        marcarTodosListos(sala);
         lanzarDadosEnSala(sala, 's1', () => 0);
 
         expect(registrarAccionTurnoEnSala(sala, 's9').error).toBe(
@@ -280,6 +291,7 @@ describe('Salas multijugador', () => {
         const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
         agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
         iniciarPartidaEnSala(sala, 's1');
+        marcarTodosListos(sala);
         lanzarDadosEnSala(sala, 's1', () => 0);
         registrarAccionTurnoEnSala(sala, 's1');
 
@@ -289,5 +301,43 @@ describe('Salas multijugador', () => {
         expect(evento.numeroRonda).toBe(1);
         expect(sala.dadosRonda).toBeNull();
         expect(sala.accionesTurno.size).toBe(0);
+    });
+
+    it('bloquea el lanzamiento hasta que todos los jugadores estén listos', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        expect(lanzarDadosEnSala(sala, 's1').error).toBe(
+            'Esperando a que todos los jugadores estén listos.'
+        );
+
+        marcarJugadorListoEnSala(sala, 's1');
+        expect(construirEstadoListos(sala).todosListos).toBe(false);
+        expect(construirEstadoListos(sala).listos).toBe(1);
+        expect(construirEstadoListos(sala).total).toBe(2);
+
+        marcarJugadorListoEnSala(sala, 's2');
+        expect(construirEstadoListos(sala).todosListos).toBe(true);
+
+        expect(lanzarDadosEnSala(sala, 's1').error).toBeNull();
+    });
+
+    it('desbloquea el lanzamiento cuando un jugador pendiente se desconecta', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        agregarJugadorASala(sala, crearSocketFalso('s3', 'Eva'));
+        iniciarPartidaEnSala(sala, 's1');
+        marcarJugadorListoEnSala(sala, 's1');
+        marcarJugadorListoEnSala(sala, 's2');
+
+        expect(lanzarDadosEnSala(sala, 's1').error).toBe(
+            'Esperando a que todos los jugadores estén listos.'
+        );
+
+        salirDeSala(sala, 's3');
+
+        expect(construirEstadoListos(sala).todosListos).toBe(true);
+        expect(lanzarDadosEnSala(sala, 's1').error).toBeNull();
     });
 });
