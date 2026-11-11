@@ -7,11 +7,17 @@ const { Server } = require('socket.io');
 const bd = require('./BD/base-datos');
 
 const servidor = express();
-servidor.use(cors());
+
+// Origen permitido para CORS. En producción define CORS_ORIGIN con el
+// dominio del frontend (p. ej. https://tu-app.vercel.app).
+const ORIGEN_PERMITIDO = process.env.CORS_ORIGIN || '*';
+
+servidor.use(cors({ origin: ORIGEN_PERMITIDO }));
 servidor.use(express.json());
 
 // Clave secreta para firmar los tokens
-const CLAVE_SECRETA_JWT = 'clave_secreta_super_segura_123';
+const CLAVE_SECRETA_JWT =
+    process.env.JWT_SECRET || 'clave_secreta_super_segura_123';
 
 // ==========================================
 // MIDDLEWARES DE SEGURIDAD
@@ -269,7 +275,7 @@ const servidorHttp = http.createServer(servidor);
 
 const io = new Server(servidorHttp, {
     cors: {
-        origin: '*',
+        origin: ORIGEN_PERMITIDO,
         methods: ['GET', 'POST']
     }
 });
@@ -970,7 +976,7 @@ io.on('connection', (socket) => {
 
 // Iniciar servidor solo si se ejecuta directamente
 if (require.main === module) {
-    const PUERTO = process.env.PUERTO || 3000;
+    const PUERTO = process.env.PORT || process.env.PUERTO || 3000;
     servidorHttp.listen(PUERTO, () => {
         console.log(`Servidor corriendo en el puerto ${PUERTO}`);
     });

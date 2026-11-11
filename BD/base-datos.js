@@ -1,8 +1,16 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 
-// Definir la ruta del archivo de la base de datos dentro de la carpeta BD
-const rutaBaseDatos = path.join(__dirname, 'usuarios.db');
+// Ruta del archivo de la base de datos. Configurable mediante DB_PATH para
+// entornos con filesystem efímero (Render/Railway): apunta a un disco
+// persistente montado, p. ej. DB_PATH=/var/data/usuarios.db.
+const rutaBaseDatos =
+    process.env.DB_PATH || path.join(__dirname, 'usuarios.db');
+
+// Garantiza que exista el directorio destino antes de abrir la base de datos.
+fs.mkdirSync(path.dirname(rutaBaseDatos), { recursive: true });
+
 const bd = new sqlite3.Database(rutaBaseDatos, (error) => {
     if (error) {
         console.error('Error al conectar con la base de datos:', error.message);
