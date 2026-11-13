@@ -23,6 +23,7 @@ describe('Pruebas del Endpoint POST /register', () => {
         expect(respuesta.statusCode).toBe(201);
         expect(respuesta.body.estado).toBe('exito');
         expect(respuesta.body.idUsuario).toBeDefined();
+        expect(respuesta.body.token).toBeDefined();
     });
 
     it('debe fallar si el usuario ya se encuentra registrado', async () => {

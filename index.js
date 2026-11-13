@@ -5,6 +5,11 @@ const jwt = require('jsonwebtoken');
 const http = require('http');
 const { Server } = require('socket.io');
 const bd = require('./BD/base-datos');
+const {
+    normalizarNumeroMapa,
+    esRegionValidaParaMapa,
+    obtenerPuntosRegion
+} = require('./config/regiones');
 
 const servidor = express();
 
@@ -18,6 +23,9 @@ servidor.use(express.json());
 // Clave secreta para firmar los tokens
 const CLAVE_SECRETA_JWT =
     process.env.JWT_SECRET || 'clave_secreta_super_segura_123';
+
+const crearTokenUsuario = (idUsuario, usuario) =>
+    jwt.sign({ idUsuario, usuario }, CLAVE_SECRETA_JWT, { expiresIn: '24h' });
 
 // ==========================================
 // MIDDLEWARES DE SEGURIDAD
@@ -136,10 +144,16 @@ const manejarRegistroUsuario = async (solicitud, respuesta) => {
                         });
                     }
 
+                    const token = crearTokenUsuario(
+                        this.lastID,
+                        usuarioNormalizado
+                    );
+
                     return respuesta.status(201).json({
                         estado: 'exito',
                         mensaje: 'Usuario registrado exitosamente',
-                        idUsuario: this.lastID
+                        idUsuario: this.lastID,
+                        token
                     });
                 });
             } catch (errorEncriptacion) {
@@ -203,13 +217,9 @@ const manejarInicioSesion = async (solicitud, respuesta) => {
                 });
             }
 
-            const token = jwt.sign(
-                {
-                    idUsuario: usuarioEncontrado.id,
-                    usuario: usuarioEncontrado.usuario
-                },
-                CLAVE_SECRETA_JWT,
-                { expiresIn: '24h' }
+            const token = crearTokenUsuario(
+                usuarioEncontrado.id,
+                usuarioEncontrado.usuario
             );
 
             return respuesta.status(200).json({
@@ -260,12 +270,51 @@ const manejarEliminarCuenta = (solicitud, respuesta) => {
     }
 };
 
+// Valida que el token siga correspondiendo a una cuenta existente.
+const manejarValidarSesion = (solicitud, respuesta) => {
+    const idUsuario = solicitud.usuario && solicitud.usuario.idUsuario;
+
+    if (!idUsuario) {
+        return respuesta.status(401).json({
+            estado: 'error',
+            mensaje: 'Sesión no válida.'
+        });
+    }
+
+    bd.get(
+        'SELECT id, usuario FROM usuarios WHERE id = ?',
+        [idUsuario],
+        (error, usuarioEncontrado) => {
+            if (error) {
+                return respuesta.status(500).json({
+                    estado: 'error',
+                    mensaje: 'Error interno al validar la sesión.'
+                });
+            }
+
+            if (!usuarioEncontrado) {
+                return respuesta.status(401).json({
+                    estado: 'error',
+                    mensaje: 'La cuenta asociada a esta sesión ya no existe.'
+                });
+            }
+
+            return respuesta.status(200).json({
+                estado: 'exito',
+                idUsuario: usuarioEncontrado.id,
+                usuario: usuarioEncontrado.usuario
+            });
+        }
+    );
+};
+
 // ==========================================
 // DEFINICIÓN DE RUTAS
 // ==========================================
 servidor.get('/ping', manejarPruebaEstado);
 servidor.post('/register', manejarRegistroUsuario);
 servidor.post('/login', manejarInicioSesion);
+servidor.get('/session', verificarTokenJWT, manejarValidarSesion);
 servidor.delete('/account', verificarTokenJWT, manejarEliminarCuenta);
 
 // ==========================================
@@ -359,11 +408,13 @@ const crearJugadorSala = (socket) => ({
     puntuacion: 0
 });
 
-const crearSalaParaSocket = (socket) => {
+const crearSalaParaSocket = (socket, numeroMapa = 1) => {
     const codigo = generarCodigoSala();
+    const mapa = normalizarNumeroMapa(numeroMapa);
     const sala = {
         codigo,
         anfitrion: socket.id,
+        numeroMapa: mapa,
         iniciada: false,
         puntosParaGanar: null,
         ganador: null,
@@ -372,6 +423,8 @@ const crearSalaParaSocket = (socket) => {
         dadosRonda: null,
         accionesTurno: new Set(),
         jugadoresListos: new Set(),
+        regionesReclamadas: new Map(),
+        historialRegiones: [],
         temporizadorRonda: null
     };
 
@@ -470,6 +523,8 @@ const iniciarPartidaEnSala = (sala, socketId) => {
     sala.dadosRonda = null;
     sala.accionesTurno.clear();
     sala.jugadoresListos.clear();
+    sala.regionesReclamadas.clear();
+    sala.historialRegiones = [];
     detenerTemporizadorRonda(sala);
     sala.jugadores.forEach((jugador) => {
         jugador.puntuacion = 0;
@@ -566,8 +621,8 @@ const registrarAccionTurnoEnSala = (sala, socketId) => {
     return { error: null, rondaCompleta };
 };
 
-const actualizarPuntuacionEnSala = (sala, idSocket, puntuacion) => {
-    const jugador = buscarJugadorEnSala(sala, idSocket);
+const reclamarRegionEnSala = (sala, idSocket, region) => {
+    const jugador = sala ? buscarJugadorEnSala(sala, idSocket) : null;
 
     if (!jugador) {
         return { error: 'No perteneces a esta sala.', gano: false };
@@ -581,12 +636,41 @@ const actualizarPuntuacionEnSala = (sala, idSocket, puntuacion) => {
         return { error: 'La partida ya terminó.', gano: false };
     }
 
-    const valor = Number(puntuacion);
-    if (!Number.isFinite(valor)) {
-        return { error: 'Puntuación inválida.', gano: false };
+    if (typeof region !== 'string' || !esRegionValidaParaMapa(sala.numeroMapa, region)) {
+        return { error: 'Región inválida para este mapa.', gano: false };
     }
 
-    jugador.puntuacion = Math.max(0, Math.trunc(valor));
+    const reclamaciones = sala.regionesReclamadas.get(region) || [];
+
+    if (reclamaciones.some((reclamacion) => reclamacion.socketId === idSocket)) {
+        return {
+            error: 'Ya completaste esta región en esta partida.',
+            gano: false
+        };
+    }
+
+    const puesto = reclamaciones.length + 1;
+    const puntos = obtenerPuntosRegion(region, puesto);
+
+    reclamaciones.push({
+        socketId: jugador.socketId,
+        usuario: jugador.usuario,
+        puesto,
+        puntos
+    });
+    sala.regionesReclamadas.set(region, reclamaciones);
+
+    jugador.puntuacion += puntos;
+
+    const registro = {
+        region,
+        socketId: jugador.socketId,
+        usuario: jugador.usuario,
+        puesto,
+        puntos,
+        numeroRonda: sala.numeroRonda
+    };
+    sala.historialRegiones.push(registro);
 
     if (jugador.puntuacion >= sala.puntosParaGanar) {
         sala.ganador = {
@@ -600,7 +684,8 @@ const actualizarPuntuacionEnSala = (sala, idSocket, puntuacion) => {
     return {
         error: null,
         gano: Boolean(sala.ganador),
-        ganador: sala.ganador
+        ganador: sala.ganador,
+        region: registro
     };
 };
 
@@ -659,6 +744,7 @@ const salirDeSala = (sala, idSocket) => {
 const construirSalaActualizada = (sala) => ({
     codigo: sala.codigo,
     anfitrion: sala.anfitrion,
+    numeroMapa: sala.numeroMapa,
     jugadores: sala.jugadores,
     iniciada: sala.iniciada,
     puntosParaGanar: sala.puntosParaGanar,
@@ -668,24 +754,30 @@ const construirSalaActualizada = (sala) => ({
 const construirPuntuaciones = (sala) => ({
     estado: 'exito',
     codigo: sala.codigo,
+    numeroMapa: sala.numeroMapa,
     jugadores: sala.jugadores,
-    puntosParaGanar: sala.puntosParaGanar
+    puntosParaGanar: sala.puntosParaGanar,
+    historialRegiones: sala.historialRegiones
 });
 
 const construirPartidaGanada = (sala) => ({
     estado: 'exito',
     codigo: sala.codigo,
+    numeroMapa: sala.numeroMapa,
     ganador: sala.ganador,
     jugadores: sala.jugadores,
-    puntosParaGanar: sala.puntosParaGanar
+    puntosParaGanar: sala.puntosParaGanar,
+    historialRegiones: sala.historialRegiones
 });
 
 const construirPartidaLista = (sala, socketId) => ({
     estado: 'exito',
     codigo: sala.codigo,
+    numeroMapa: sala.numeroMapa,
     jugadores: sala.jugadores,
     anfitrion: sala.anfitrion,
     puntosParaGanar: sala.puntosParaGanar,
+    historialRegiones: sala.historialRegiones,
     tuSocketId: socketId
 });
 
@@ -810,15 +902,16 @@ io.on('connection', (socket) => {
         `Usuario conectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario})`
     );
 
-    socket.on('crear_sala', () => {
-        const sala = crearSalaParaSocket(socket);
+    socket.on('crear_sala', (datos) => {
+        const numeroMapa = normalizarNumeroMapa(datos && datos.numeroMapa);
+        const sala = crearSalaParaSocket(socket, numeroMapa);
 
         socket.join(sala.codigo);
         socket.emit('sala_creada', sala.codigo);
         emitirSalaActualizada(sala);
 
         console.log(
-            `Sala ${sala.codigo} creada por ${socket.usuario.usuario} (${socket.id})`
+            `Sala ${sala.codigo} creada por ${socket.usuario.usuario} (${socket.id}) en el mapa ${sala.numeroMapa}`
         );
     });
 
@@ -965,7 +1058,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('puntuacion_actualizada', (datos) => {
+    socket.on('reclamar_region', (datos) => {
         const codigo = obtenerCodigoSala(datos);
         const sala = buscarSala(codigo);
 
@@ -976,10 +1069,10 @@ io.on('connection', (socket) => {
             });
         }
 
-        const resultado = actualizarPuntuacionEnSala(
+        const resultado = reclamarRegionEnSala(
             sala,
             socket.id,
-            datos && datos.puntuacion
+            datos && datos.region
         );
 
         if (resultado.error) {
@@ -989,10 +1082,10 @@ io.on('connection', (socket) => {
             });
         }
 
-        io.to(codigo).emit(
-            'puntuaciones_actualizadas',
-            construirPuntuaciones(sala)
-        );
+        io.to(codigo).emit('puntuaciones_actualizadas', {
+            ...construirPuntuaciones(sala),
+            ultimaRegion: resultado.region
+        });
 
         if (resultado.gano) {
             io.to(codigo).emit(
@@ -1050,7 +1143,7 @@ module.exports.construirDadosLanzados = construirDadosLanzados;
 module.exports.construirRondaLista = construirRondaLista;
 module.exports.programarTemporizadorRonda = programarTemporizadorRonda;
 module.exports.SEGUNDOS_POR_RONDA = SEGUNDOS_POR_RONDA;
-module.exports.actualizarPuntuacionEnSala = actualizarPuntuacionEnSala;
+module.exports.reclamarRegionEnSala = reclamarRegionEnSala;
 module.exports.salirDeSala = salirDeSala;
 module.exports.construirSalaActualizada = construirSalaActualizada;
 module.exports.construirPartidaLista = construirPartidaLista;

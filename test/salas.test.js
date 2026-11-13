@@ -11,7 +11,7 @@ const {
     finalizarRondaEnSala,
     finalizarRondaPorTiempo,
     SEGUNDOS_POR_RONDA,
-    actualizarPuntuacionEnSala,
+    reclamarRegionEnSala,
     salirDeSala,
     construirPartidaLista,
     construirSalaActualizada,
@@ -129,44 +129,85 @@ describe('Salas multijugador', () => {
         expect(estado.jugadores).toHaveLength(2);
     });
 
-    it('actualiza puntuaciones y declara ganador al alcanzar la meta', () => {
+    it('otorga puntos escalonados por bloque según el orden de llegada', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        agregarJugadorASala(sala, crearSocketFalso('s3', 'Eva'));
+        agregarJugadorASala(sala, crearSocketFalso('s4', 'Mario'));
+        iniciarPartidaEnSala(sala, 's1');
+
+        expect(reclamarRegionEnSala(sala, 's1', 'amarillo').region.puntos).toBe(8);
+        expect(reclamarRegionEnSala(sala, 's2', 'amarillo').region.puntos).toBe(6);
+        expect(reclamarRegionEnSala(sala, 's3', 'amarillo').region.puntos).toBe(4);
+        expect(reclamarRegionEnSala(sala, 's4', 'amarillo').region.puntos).toBe(0);
+
+        expect(sala.jugadores.map((jugador) => jugador.puntuacion)).toEqual([
+            8,
+            6,
+            4,
+            0
+        ]);
+        expect(sala.historialRegiones).toHaveLength(4);
+        expect(sala.historialRegiones.map((registro) => registro.puesto)).toEqual([
+            1,
+            2,
+            3,
+            4
+        ]);
+    });
+
+    it('rechaza reclamaciones duplicadas, regiones inválidas y jugadores ajenos', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'), 1);
+        agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+
+        expect(reclamarRegionEnSala(sala, 's1', 'amarillo').error).toBe(
+            'La partida no ha iniciado.'
+        );
+        expect(reclamarRegionEnSala(sala, 's9', 'amarillo').error).toBe(
+            'No perteneces a esta sala.'
+        );
+
+        iniciarPartidaEnSala(sala, 's1');
+
+        expect(reclamarRegionEnSala(sala, 's1', 'amarillo').error).toBeNull();
+        expect(reclamarRegionEnSala(sala, 's1', 'amarillo').error).toBe(
+            'Ya completaste esta región en esta partida.'
+        );
+        expect(reclamarRegionEnSala(sala, 's1', 'naranjaNorte').error).toBe(
+            'Región inválida para este mapa.'
+        );
+    });
+
+    it('declara ganador al alcanzar la meta con puntos de región', () => {
         const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
         agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
         iniciarPartidaEnSala(sala, 's1');
-
-        const actualizacion = actualizarPuntuacionEnSala(sala, 's2', 10);
-
-        expect(actualizacion.error).toBeNull();
-        expect(actualizacion.gano).toBe(false);
-        expect(sala.jugadores[1].puntuacion).toBe(10);
+        sala.puntosParaGanar = 8;
 
         sala.temporizadorRonda = setTimeout(() => {}, 60000);
         sala.temporizadorRonda.unref();
 
-        const victoria = actualizarPuntuacionEnSala(sala, 's2', 26);
+        const victoria = reclamarRegionEnSala(sala, 's1', 'amarillo');
 
         expect(victoria.error).toBeNull();
         expect(victoria.gano).toBe(true);
-        expect(victoria.ganador.usuario).toBe('Luis');
-        expect(sala.ganador.usuario).toBe('Luis');
+        expect(victoria.ganador.usuario).toBe('Ana');
         expect(sala.temporizadorRonda).toBeNull();
 
         const carga = construirPartidaGanada(sala);
-        expect(carga.ganador.usuario).toBe('Luis');
-        expect(carga.puntosParaGanar).toBe(26);
-        expect(construirPuntuaciones(sala).jugadores[1].puntuacion).toBe(26);
+        expect(carga.ganador.usuario).toBe('Ana');
+        expect(carga.historialRegiones).toHaveLength(1);
+        expect(construirPuntuaciones(sala).jugadores[0].puntuacion).toBe(8);
     });
 
-    it('rechaza puntuaciones de jugadores ajenos o antes de iniciar', () => {
-        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'));
+    it('guarda el mapa elegido y lo comparte con los jugadores', () => {
+        const sala = crearSalaParaSocket(crearSocketFalso('s1', 'Ana'), 3);
         agregarJugadorASala(sala, crearSocketFalso('s2', 'Luis'));
+        iniciarPartidaEnSala(sala, 's1');
 
-        expect(actualizarPuntuacionEnSala(sala, 's1', 5).error).toBe(
-            'La partida no ha iniciado.'
-        );
-        expect(actualizarPuntuacionEnSala(sala, 's9', 5).error).toBe(
-            'No perteneces a esta sala.'
-        );
+        expect(sala.numeroMapa).toBe(3);
+        expect(construirSalaActualizada(sala).numeroMapa).toBe(3);
+        expect(construirPartidaLista(sala, 's2').numeroMapa).toBe(3);
     });
 
     it('mantiene la partida si un jugador sale de una sala de 3 o más', () => {
