@@ -1069,7 +1069,9 @@ io.on('connection', (socket) => {
             });
         }
 
-        const listo = !datos || datos.listo !== false;
+        const listo = !datos || datos.listo === undefined
+            ? true
+            : datos.listo === true;
         if (!marcarJugadorListoEnSala(sala, socket.id, listo)) {
             return socket.emit('error_sala', {
                 estado: 'error',
