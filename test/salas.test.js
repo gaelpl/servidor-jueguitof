@@ -379,6 +379,7 @@ describe('Salas multijugador', () => {
 
         expect(marcarJugadorListoEnSala(sala, 's2', false)).toBe(true);
         expect(construirEstadoListos(sala).todosListos).toBe(false);
+        expect(construirSalaActualizada(sala).listosIds).toEqual(['s1']);
         expect(sala.jugadores[1].listo).toBe(false);
     });
 
