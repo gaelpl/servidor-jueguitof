@@ -3,6 +3,7 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const http = require('http');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const bd = require('./BD/base-datos');
 const {
@@ -10,6 +11,13 @@ const {
     esRegionValidaParaMapa,
     obtenerPuntosRegion
 } = require('./config/regiones');
+const {
+    comoEntero,
+    obtenerLiga,
+    obtenerDivision,
+    obtenerProgresoLiga,
+    asignarPuestosPorOrden
+} = require('./config/rangos');
 
 const servidor = express();
 
@@ -51,6 +59,21 @@ const verificarTokenJWT = (solicitud, respuesta, siguiente) => {
 
         // Adjuntar los datos del usuario decodificados a la solicitud
         solicitud.usuario = usuarioDecodificado;
+        siguiente();
+    });
+};
+
+const verificarTokenOpcional = (solicitud, respuesta, siguiente) => {
+    const cabeceraAuth = solicitud.headers['authorization'];
+    const token = cabeceraAuth && cabeceraAuth.split(' ')[1];
+
+    if (!token) {
+        solicitud.usuario = null;
+        return siguiente();
+    }
+
+    jwt.verify(token, CLAVE_SECRETA_JWT, (error, usuarioDecodificado) => {
+        solicitud.usuario = error ? null : usuarioDecodificado;
         siguiente();
     });
 };
@@ -308,6 +331,131 @@ const manejarValidarSesion = (solicitud, respuesta) => {
     );
 };
 
+const CONSULTA_CLASIFICACION =
+    `SELECT id, usuario, rp, victorias_ranked, partidas_ranked ` +
+    `FROM usuarios ORDER BY rp DESC, victorias_ranked DESC, partidas_ranked ASC, id ASC LIMIT ?`;
+
+const CONSULTA_POSICION =
+    `SELECT COUNT(*) AS posicion FROM usuarios WHERE rp > ? ` +
+    `OR (rp = ? AND victorias_ranked > ?) ` +
+    `OR (rp = ? AND victorias_ranked = ? AND partidas_ranked < ?) ` +
+    `OR (rp = ? AND victorias_ranked = ? AND partidas_ranked = ? AND id < ?)`;
+
+const crearEntradaClasificacion = (fila, posicion) => ({
+    posicion,
+    idUsuario: fila.id,
+    usuario: fila.usuario,
+    liga: obtenerLiga(fila.rp).nombre,
+    division: obtenerDivision(fila.rp),
+    rp: comoEntero(fila.rp),
+    victorias: fila.victorias_ranked,
+    partidas: fila.partidas_ranked
+});
+
+const manejarClasificacion = (solicitud, respuesta) => {
+    const limiteSolicitado = Number(solicitud.query.limite);
+    const limite =
+        Number.isInteger(limiteSolicitado) && limiteSolicitado > 0
+            ? Math.min(limiteSolicitado, 100)
+            : 10;
+
+    bd.all(CONSULTA_CLASIFICACION, [limite], (error, filas) => {
+        if (error) {
+            return respuesta.status(500).json({
+                estado: 'error',
+                mensaje: 'Error interno al consultar la clasificación.'
+            });
+        }
+
+        const entradas = filas.map((fila, indice) =>
+            crearEntradaClasificacion(fila, indice + 1)
+        );
+        const responder = (usuarioActual) =>
+            respuesta.json({
+                estado: 'exito',
+                limite,
+                total: entradas.length,
+                entradas,
+                usuarioActual
+            });
+
+        const idUsuario = solicitud.usuario && solicitud.usuario.idUsuario;
+        if (!idUsuario) return responder(null);
+
+        const consultaUsuario =
+            `SELECT id, usuario, rp, victorias_ranked, partidas_ranked FROM usuarios WHERE id = ?`;
+        bd.get(consultaUsuario, [idUsuario], (errorUsuario, filaUsuario) => {
+            if (errorUsuario || !filaUsuario) return responder(null);
+
+            const parametros = [
+                filaUsuario.rp,
+                filaUsuario.rp,
+                filaUsuario.victorias_ranked,
+                filaUsuario.rp,
+                filaUsuario.victorias_ranked,
+                filaUsuario.partidas_ranked,
+                filaUsuario.rp,
+                filaUsuario.victorias_ranked,
+                filaUsuario.partidas_ranked,
+                filaUsuario.id
+            ];
+
+            bd.get(CONSULTA_POSICION, parametros, (errorPosicion, filaPosicion) => {
+                if (errorPosicion || !filaPosicion) return responder(null);
+                responder(
+                    crearEntradaClasificacion(
+                        filaUsuario,
+                        filaPosicion.posicion + 1
+                    )
+                );
+            });
+        });
+    });
+};
+
+const manejarPerfilRanked = (solicitud, respuesta) => {
+    const idUsuario = solicitud.usuario && solicitud.usuario.idUsuario;
+    if (!idUsuario) {
+        return respuesta.status(401).json({
+            estado: 'error',
+            mensaje: 'Sesión no válida.'
+        });
+    }
+
+    bd.get(
+        `SELECT id, usuario, rp, partidas_ranked, victorias_ranked, derrotas_ranked FROM usuarios WHERE id = ?`,
+        [idUsuario],
+        (error, fila) => {
+            if (error) {
+                return respuesta.status(500).json({
+                    estado: 'error',
+                    mensaje: 'Error interno al consultar el perfil.'
+                });
+            }
+
+            if (!fila) {
+                return respuesta.status(404).json({
+                    estado: 'error',
+                    mensaje: 'Usuario no encontrado.'
+                });
+            }
+
+            respuesta.json({
+                estado: 'exito',
+                idUsuario: fila.id,
+                usuario: fila.usuario,
+                rp: comoEntero(fila.rp),
+                liga: obtenerLiga(fila.rp).nombre,
+                division: obtenerDivision(fila.rp),
+                progreso: obtenerProgresoLiga(fila.rp),
+                partidas: fila.partidas_ranked,
+                victorias: fila.victorias_ranked,
+                derrotas: fila.derrotas_ranked
+            });
+        }
+    );
+};
+
 // ==========================================
 // DEFINICIÓN DE RUTAS
 // ==========================================
@@ -316,6 +464,8 @@ servidor.post('/register', manejarRegistroUsuario);
 servidor.post('/login', manejarInicioSesion);
 servidor.get('/session', verificarTokenJWT, manejarValidarSesion);
 servidor.delete('/account', verificarTokenJWT, manejarEliminarCuenta);
+servidor.get('/clasificacion', verificarTokenOpcional, manejarClasificacion);
+servidor.get('/perfil', verificarTokenJWT, manejarPerfilRanked);
 
 // ==========================================
 // SERVIDOR HTTP Y SOCKET.IO
@@ -342,9 +492,27 @@ io.use((socket, siguiente) => {
             return siguiente(new Error('Token inválido o expirado.'));
         }
 
-        // Guardar los datos del usuario en el objeto socket
-        socket.usuario = usuarioDecodificado;
-        siguiente();
+        bd.get(
+            `SELECT id, usuario FROM usuarios WHERE id = ?`,
+            [usuarioDecodificado.idUsuario],
+            (errorConsulta, usuarioExistente) => {
+                if (errorConsulta) {
+                    return siguiente(new Error('Error interno de autenticación.'));
+                }
+
+                if (!usuarioExistente) {
+                    return siguiente(
+                        new Error('La cuenta asociada a esta sesión ya no existe.')
+                    );
+                }
+
+                socket.usuario = {
+                    idUsuario: usuarioExistente.id,
+                    usuario: usuarioExistente.usuario
+                };
+                siguiente();
+            }
+        );
     });
 });
 
@@ -358,6 +526,11 @@ const MAX_JUGADORES = 5;
 const MIN_JUGADORES = 2;
 const SEGUNDOS_POR_RONDA = 30;
 const MILISEGUNDOS_POR_RONDA = SEGUNDOS_POR_RONDA * 1000;
+const SEGUNDOS_GRACIA_RANKED = 25;
+const MILISEGUNDOS_GRACIA_RANKED = SEGUNDOS_GRACIA_RANKED * 1000;
+
+const normalizarModo = (modo) =>
+    String(modo ?? '').trim().toLowerCase() === 'ranked' ? 'ranked' : 'casual';
 
 const generarCodigoSala = () => {
     let codigo;
@@ -406,19 +579,23 @@ const crearJugadorSala = (socket) => ({
     idUsuario: socket.usuario.idUsuario,
     usuario: socket.usuario.usuario,
     puntuacion: 0,
-    listo: false
+    listo: false,
+    conectado: true
 });
 
-const crearSalaParaSocket = (socket, numeroMapa = 1) => {
+const crearSalaParaSocket = (socket, numeroMapa = 1, modo = 'casual') => {
     const codigo = generarCodigoSala();
     const mapa = normalizarNumeroMapa(numeroMapa);
     const sala = {
         codigo,
+        idPartida: crypto.randomUUID(),
+        modo: normalizarModo(modo),
         anfitrion: socket.id,
         numeroMapa: mapa,
         iniciada: false,
         puntosParaGanar: null,
         ganador: null,
+        resultadoAsentado: false,
         jugadores: [crearJugadorSala(socket)],
         numeroRonda: 0,
         dadosRonda: null,
@@ -427,6 +604,7 @@ const crearSalaParaSocket = (socket, numeroMapa = 1) => {
         regionesReclamadas: new Map(),
         historialRegiones: [],
         tablerosPorSocket: new Map(),
+        desconectados: new Map(),
         temporizadorRonda: null
     };
 
@@ -440,6 +618,21 @@ const buscarSala = (codigo) => salas.get(normalizarCodigoSala(codigo));
 
 const buscarJugadorEnSala = (sala, socketId) =>
     sala.jugadores.find((jugador) => jugador.socketId === socketId);
+
+const cargarPerfilRanked = (sala, jugador) => {
+    bd.get(
+        `SELECT rp FROM usuarios WHERE id = ?`,
+        [jugador.idUsuario],
+        (error, fila) => {
+            if (error || !fila) return;
+            if (!sala.jugadores.includes(jugador)) return;
+
+            jugador.rp = comoEntero(fila.rp);
+            jugador.liga = obtenerLiga(jugador.rp).nombre;
+            jugador.division = obtenerDivision(jugador.rp);
+        }
+    );
+};
 
 const detenerTemporizadorRonda = (sala) => {
     if (!sala || !sala.temporizadorRonda) return;
@@ -504,6 +697,14 @@ const agregarJugadorASala = (sala, socket) => {
         return 'Ya estás en esta sala.';
     }
 
+    if (
+        sala.jugadores.some(
+            (jugador) => jugador.idUsuario === socket.usuario.idUsuario
+        )
+    ) {
+        return 'Ya estás en esta sala con otra conexión.';
+    }
+
     sala.jugadores.push(crearJugadorSala(socket));
     return null;
 };
@@ -519,6 +720,10 @@ const iniciarPartidaEnSala = (sala, socketId) => {
 
     if (sala.jugadores.length < MIN_JUGADORES) {
         return 'Se necesitan al menos 2 jugadores para iniciar.';
+    }
+
+    if (sala.jugadores.some((jugador) => jugador.conectado === false)) {
+        return 'Todos los jugadores deben estar conectados para iniciar.';
     }
 
     if (!sala.jugadores.every((jugador) =>
@@ -597,6 +802,13 @@ const registrarAccionTurnoEnSala = (sala, socketId) => {
         return { error: 'No perteneces a esta sala.', rondaCompleta: false };
     }
 
+    if (jugador.conectado === false) {
+        return {
+            error: 'Esperando a que se restablezca tu conexión.',
+            rondaCompleta: false
+        };
+    }
+
     if (!sala.iniciada) {
         return { error: 'La partida no ha iniciado.', rondaCompleta: false };
     }
@@ -630,11 +842,39 @@ const registrarAccionTurnoEnSala = (sala, socketId) => {
     return { error: null, rondaCompleta };
 };
 
+const esTableroValidoParaRanked = (tablero) => {
+    if (!tablero || !Array.isArray(tablero.celdas) || tablero.celdas.length !== 49) {
+        return false;
+    }
+
+    const numeroMapa = Number(tablero.numeroMapa);
+    if (!Number.isInteger(numeroMapa) || numeroMapa < 1 || numeroMapa > 4) {
+        return false;
+    }
+
+    const valoresEstrella = tablero.celdas
+        .filter((celda) => celda && celda.esEstrella === true)
+        .map((celda) => celda.valor)
+        .sort((a, b) => a - b);
+
+    return (
+        valoresEstrella.length === 6 &&
+        valoresEstrella.every((valor, indice) => valor === indice + 1)
+    );
+};
+
 const reclamarRegionEnSala = (sala, idSocket, region) => {
     const jugador = sala ? buscarJugadorEnSala(sala, idSocket) : null;
 
     if (!jugador) {
         return { error: 'No perteneces a esta sala.', gano: false };
+    }
+
+    if (jugador.conectado === false) {
+        return {
+            error: 'Esperando a que se restablezca tu conexión.',
+            gano: false
+        };
     }
 
     if (!sala.iniciada) {
@@ -643,6 +883,33 @@ const reclamarRegionEnSala = (sala, idSocket, region) => {
 
     if (sala.ganador) {
         return { error: 'La partida ya terminó.', gano: false };
+    }
+
+    if (sala.modo === 'ranked') {
+        if (!sala.dadosRonda) {
+            return {
+                error: 'Debes esperar al lanzamiento de dados del anfitrión.',
+                gano: false
+            };
+        }
+
+        if (sala.accionesTurno.has(idSocket)) {
+            return {
+                error: 'Ya completaste tu acción en esta ronda.',
+                gano: false
+            };
+        }
+
+        const tablero = sala.tablerosPorSocket.get(idSocket);
+        if (
+            tablero &&
+            !tablero.celdas.some((celda) => celda.region === region)
+        ) {
+            return {
+                error: 'La región no está en tu tablero.',
+                gano: false
+            };
+        }
     }
 
     if (typeof region !== 'string' || !esRegionValidaParaMapa(sala.numeroMapa, region)) {
@@ -758,6 +1025,8 @@ const salirDeSala = (sala, idSocket) => {
 
 const construirSalaActualizada = (sala) => ({
     codigo: sala.codigo,
+    idPartida: sala.idPartida,
+    modo: sala.modo,
     anfitrion: sala.anfitrion,
     numeroMapa: sala.numeroMapa,
     jugadores: sala.jugadores,
@@ -779,6 +1048,8 @@ const construirPuntuaciones = (sala) => ({
 const construirPartidaGanada = (sala) => ({
     estado: 'exito',
     codigo: sala.codigo,
+    idPartida: sala.idPartida,
+    modo: sala.modo,
     numeroMapa: sala.numeroMapa,
     ganador: sala.ganador,
     jugadores: sala.jugadores,
@@ -786,9 +1057,216 @@ const construirPartidaGanada = (sala) => ({
     historialRegiones: sala.historialRegiones
 });
 
+const registrarPartidaEnBD = (sala) => {
+    if (!sala || sala.modo !== 'ranked') return;
+
+    bd.run(
+        `INSERT OR IGNORE INTO partidas (id_partida, codigo_sala, numero_mapa, iniciada_en) VALUES (?, ?, ?, ?)`,
+        [sala.idPartida, sala.codigo, sala.numeroMapa, new Date().toISOString()]
+    );
+};
+
+const emitirResultadoRanked = (sala, motivoFin, resultados) => {
+    io.to(sala.codigo).emit('partida_ganada', construirPartidaGanada(sala));
+
+    const clasificacion = resultados.map((entrada) => ({
+        idUsuario: entrada.idUsuario,
+        usuario: entrada.usuario,
+        puesto: entrada.puesto,
+        puntuacion: entrada.puntuacion,
+        rpDelta: entrada.rpDelta,
+        liga: entrada.ligaDespues
+    }));
+
+    resultados.forEach((entrada) => {
+        io.to(entrada.socketId).emit('resultado_ranked', {
+            estado: 'exito',
+            idPartida: sala.idPartida,
+            codigo: sala.codigo,
+            motivoFin,
+            puesto: entrada.puesto,
+            posicionDesde: entrada.posicionDesde,
+            posicionHasta: entrada.posicionHasta,
+            puntuacion: entrada.puntuacion,
+            rpAntes: entrada.rpAntes,
+            rpDelta: entrada.rpDelta,
+            rpDespues: entrada.rpDespues,
+            ligaAntes: entrada.ligaAntes,
+            ligaDespues: entrada.ligaDespues,
+            cambioLiga: entrada.cambioLiga,
+            clasificacion
+        });
+    });
+
+    io.to(sala.codigo).emit('clasificacion_actualizada');
+};
+
+const asentarEnBaseDeDatos = (sala, motivoFin, clasificacion, idGanador, alTerminar) => {
+    if (!clasificacion.length) return alTerminar([]);
+
+    const resultados = [];
+    let pendientes = clasificacion.length;
+    let huboError = false;
+
+    const finalizar = () => {
+        if (huboError) {
+            bd.run('ROLLBACK');
+            return alTerminar(null);
+        }
+
+        bd.run('COMMIT');
+        alTerminar(resultados);
+    };
+
+    bd.serialize(() => {
+        bd.run('BEGIN IMMEDIATE');
+        bd.run(
+            `UPDATE partidas SET asentada = 1, finalizada_en = ?, motivo_fin = ?, ganador_id_usuario = ? WHERE id_partida = ? AND asentada = 0`,
+            [new Date().toISOString(), motivoFin, idGanador, sala.idPartida],
+            function (error) {
+                if (error || this.changes !== 1) huboError = true;
+            }
+        );
+
+        clasificacion.forEach((entrada) => {
+            bd.get(
+                `SELECT rp FROM usuarios WHERE id = ?`,
+                [entrada.idUsuario],
+                (errorConsulta, fila) => {
+                    if (errorConsulta || !fila) {
+                        pendientes -= 1;
+                        if (pendientes === 0) finalizar();
+                        return;
+                    }
+
+                    const rpAntes = comoEntero(fila.rp);
+                    const ligaAntes = obtenerLiga(rpAntes).nombre;
+                    const rpDespues = Math.max(0, rpAntes + entrada.rpDelta);
+                    const ligaDespues = obtenerLiga(rpDespues).nombre;
+                    const gano = entrada.puesto === 1;
+
+                    bd.run(
+                        `INSERT INTO partida_jugadores (
+                            id_partida, id_usuario, posicion_desde, posicion_hasta,
+                            puesto_mostrado, puntuacion, rp_antes, rp_delta,
+                            rp_despues, liga_antes, liga_despues, resultado
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [
+                            sala.idPartida,
+                            entrada.idUsuario,
+                            entrada.posicionDesde,
+                            entrada.posicionHasta,
+                            entrada.puesto,
+                            entrada.puntuacion,
+                            rpAntes,
+                            entrada.rpDelta,
+                            rpDespues,
+                            ligaAntes,
+                            ligaDespues,
+                            gano ? 'victoria' : 'derrota'
+                        ]
+                    );
+
+                    bd.run(
+                        `UPDATE usuarios SET rp = ?, partidas_ranked = partidas_ranked + 1, victorias_ranked = victorias_ranked + ?, derrotas_ranked = derrotas_ranked + ? WHERE id = ?`,
+                        [rpDespues, gano ? 1 : 0, gano ? 0 : 1, entrada.idUsuario]
+                    );
+
+                    resultados.push({
+                        socketId: entrada.socketId,
+                        idUsuario: entrada.idUsuario,
+                        usuario: entrada.usuario,
+                        puesto: entrada.puesto,
+                        posicionDesde: entrada.posicionDesde,
+                        posicionHasta: entrada.posicionHasta,
+                        puntuacion: entrada.puntuacion,
+                        rpAntes,
+                        rpDelta: entrada.rpDelta,
+                        rpDespues,
+                        ligaAntes,
+                        ligaDespues,
+                        cambioLiga: {
+                            antes: ligaAntes,
+                            despues: ligaDespues,
+                            tipo:
+                                ligaAntes === ligaDespues
+                                    ? null
+                                    : obtenerLiga(rpDespues).min > obtenerLiga(rpAntes).min
+                                        ? 'ascenso'
+                                        : 'descenso'
+                        }
+                    });
+
+                    pendientes -= 1;
+                    if (pendientes === 0) finalizar();
+                }
+            );
+        });
+    });
+};
+
+const finalizarYAsentarPartida = (sala, motivoFin, opciones = {}) => {
+    if (
+        !sala ||
+        sala.modo !== 'ranked' ||
+        !sala.iniciada ||
+        sala.resultadoAsentado
+    ) {
+        return false;
+    }
+
+    sala.resultadoAsentado = true;
+    detenerTemporizadorRonda(sala);
+    sala.dadosRonda = null;
+
+    const participantes = sala.jugadores.map((jugador) => ({
+        socketId: jugador.socketId,
+        idUsuario: jugador.idUsuario,
+        usuario: jugador.usuario,
+        puntuacion: comoEntero(jugador.puntuacion)
+    }));
+
+    const ordenados = [...participantes].sort(
+        (a, b) => b.puntuacion - a.puntuacion
+    );
+
+    if (opciones.forzarUltimo) {
+        const indice = ordenados.findIndex(
+            (jugador) => jugador.socketId === opciones.forzarUltimo
+        );
+        if (indice >= 0 && indice < ordenados.length - 1) {
+            const [jugador] = ordenados.splice(indice, 1);
+            ordenados.push(jugador);
+        }
+    }
+
+    const clasificacion = asignarPuestosPorOrden(ordenados);
+    const ganador = clasificacion[0];
+
+    sala.ganador = {
+        socketId: ganador.socketId,
+        usuario: ganador.usuario,
+        puntuacion: ganador.puntuacion
+    };
+
+    asentarEnBaseDeDatos(
+        sala,
+        motivoFin,
+        clasificacion,
+        ganador.idUsuario,
+        (resultados) => {
+            if (resultados) emitirResultadoRanked(sala, motivoFin, resultados);
+        }
+    );
+
+    return true;
+};
+
 const construirPartidaLista = (sala, socketId) => ({
     estado: 'exito',
     codigo: sala.codigo,
+    idPartida: sala.idPartida,
+    modo: sala.modo,
     numeroMapa: sala.numeroMapa,
     jugadores: sala.jugadores,
     anfitrion: sala.anfitrion,
@@ -887,29 +1365,188 @@ const construirEventoSalida = (sala, jugador, anfitrion) => ({
     jugadores: sala.jugadores
 });
 
-const manejarSalidaJugador = (conexion, codigoSala, motivo) => {
+const notificarSalidaConGracia = (sala, jugador, motivo) => {
+    const evento = {
+        ...construirEventoSalida(sala, jugador, sala.anfitrion),
+        idUsuario: jugador.idUsuario,
+        graciaSegundos: SEGUNDOS_GRACIA_RANKED
+    };
+
+    if (sala.jugadores.length === 2) {
+        io.to(sala.codigo).emit(
+            motivo === 'concedio' ? 'rival_concedio' : 'rival_desconectado',
+            evento
+        );
+        return;
+    }
+
+    io.to(sala.codigo).emit(
+        motivo === 'concedio' ? 'jugador_concedio' : 'jugador_desconectado',
+        evento
+    );
+};
+
+const iniciarGraciaDesconexion = (conexion, sala, motivo) => {
+    const jugador = buscarJugadorEnSala(sala, conexion.id);
+    if (!jugador) return;
+
+    if (!sala.iniciada || sala.resultadoAsentado) {
+        return manejarSalidaJugador(conexion, sala.codigo, motivo, {
+            idSocket: conexion.id
+        });
+    }
+
+    if (sala.desconectados.has(conexion.id)) return;
+
+    jugador.conectado = false;
+    jugador.desconectadoEn = Date.now();
+    detenerTemporizadorRonda(sala);
+    notificarSalidaConGracia(sala, jugador, motivo);
+
+    const temporizador = setTimeout(() => {
+        sala.desconectados.delete(conexion.id);
+        manejarSalidaJugador(conexion, sala.codigo, motivo, {
+            idSocket: conexion.id,
+            confirmado: true,
+            forzarUltimo: true,
+            silencioso: true
+        });
+    }, MILISEGUNDOS_GRACIA_RANKED);
+
+    if (typeof temporizador.unref === 'function') temporizador.unref();
+
+    sala.desconectados.set(conexion.id, {
+        idUsuario: jugador.idUsuario,
+        motivo,
+        temporizador
+    });
+};
+
+const reasociarJugadorDesconectado = (socket) => {
+    for (const sala of salas.values()) {
+        const entrada = [...sala.desconectados.entries()].find(
+            ([, pendiente]) => pendiente.idUsuario === socket.usuario.idUsuario
+        );
+        if (!entrada) continue;
+
+        const [idSocketAnterior, pendiente] = entrada;
+        clearTimeout(pendiente.temporizador);
+        sala.desconectados.delete(idSocketAnterior);
+
+        const jugador = buscarJugadorEnSala(sala, idSocketAnterior);
+        if (!jugador) continue;
+
+        jugador.socketId = socket.id;
+        jugador.conectado = true;
+        delete jugador.desconectadoEn;
+
+        if (sala.jugadoresListos.delete(idSocketAnterior)) {
+            sala.jugadoresListos.add(socket.id);
+        }
+        if (sala.accionesTurno.delete(idSocketAnterior)) {
+            sala.accionesTurno.add(socket.id);
+        }
+        if (sala.tablerosPorSocket.has(idSocketAnterior)) {
+            sala.tablerosPorSocket.set(
+                socket.id,
+                sala.tablerosPorSocket.get(idSocketAnterior)
+            );
+            sala.tablerosPorSocket.delete(idSocketAnterior);
+        }
+        if (sala.anfitrion === idSocketAnterior) sala.anfitrion = socket.id;
+        if (sala.ganador && sala.ganador.socketId === idSocketAnterior) {
+            sala.ganador.socketId = socket.id;
+        }
+
+        sala.regionesReclamadas.forEach((reclamaciones) => {
+            reclamaciones.forEach((reclamacion) => {
+                if (reclamacion.socketId === idSocketAnterior) {
+                    reclamacion.socketId = socket.id;
+                }
+            });
+        });
+        sala.historialRegiones.forEach((registro) => {
+            if (registro.socketId === idSocketAnterior) {
+                registro.socketId = socket.id;
+            }
+        });
+
+        socket.join(sala.codigo);
+        if (sala.dadosRonda) programarTemporizadorRonda(sala);
+
+        io.to(sala.codigo).emit(
+            'jugador_reconectado',
+            construirEventoSalida(sala, jugador, sala.anfitrion)
+        );
+        emitirSalaActualizada(sala);
+        io.to(sala.codigo).emit('estado_listos', construirEstadoListos(sala));
+        socket.emit('tableros_actualizados', construirTablerosActualizados(sala));
+        return;
+    }
+};
+
+const manejarSalidaJugador = (conexion, codigoSala, motivo, opciones = {}) => {
     const codigo = normalizarCodigoSala(codigoSala);
     const sala = buscarSala(codigo);
 
     if (!sala) return;
 
+    const idSocket = opciones.idSocket || conexion.id;
+    if (!buscarJugadorEnSala(sala, idSocket)) return;
+
     const cantidadAntes = sala.jugadores.length;
     const estabaIniciada = sala.iniciada;
-    const resultado = salirDeSala(sala, conexion.id);
-
-    if (!resultado) return;
-
-    conexion.leave(codigo);
-
-    if (resultado.salaEliminada) return;
-
-    const eventoSalida = construirEventoSalida(
-        sala,
-        resultado.jugador,
-        resultado.anfitrion
+    const debeAsentar = Boolean(
+        opciones.confirmado && sala.modo === 'ranked' && sala.iniciada
     );
 
-    let eventoRonda = null;
+    if (debeAsentar) {
+        finalizarYAsentarPartida(
+            sala,
+            motivo === 'concedio' ? 'rendicion' : 'abandono',
+            { forzarUltimo: idSocket }
+        );
+    }
+
+    const resultado = salirDeSala(sala, idSocket);
+    if (!resultado) return;
+
+    const pendiente = sala.desconectados.get(idSocket);
+    if (pendiente) {
+        clearTimeout(pendiente.temporizador);
+        sala.desconectados.delete(idSocket);
+    }
+
+    if (conexion.connected) conexion.leave(codigo);
+    if (resultado.salaEliminada) return;
+
+    if (!opciones.silencioso) {
+        const eventoSalida = construirEventoSalida(
+            sala,
+            resultado.jugador,
+            resultado.anfitrion
+        );
+
+        if (resultado.ganador && !debeAsentar) {
+            io.to(codigo).emit('partida_ganada', construirPartidaGanada(sala));
+
+            if (cantidadAntes === 2) {
+                io.to(codigo).emit(
+                    motivo === 'concedio' ? 'rival_concedio' : 'rival_desconectado'
+                );
+            } else if (motivo === 'concedio') {
+                io.to(codigo).emit('jugador_concedio', eventoSalida);
+            } else {
+                io.to(codigo).emit('jugador_desconectado', eventoSalida);
+            }
+        } else if (!resultado.ganador && estabaIniciada && cantidadAntes > 2) {
+            io.to(codigo).emit(
+                motivo === 'concedio' ? 'jugador_concedio' : 'jugador_desconectado',
+                eventoSalida
+            );
+        }
+    }
+
     if (
         !resultado.ganador &&
         sala.dadosRonda &&
@@ -917,33 +1554,8 @@ const manejarSalidaJugador = (conexion, codigoSala, motivo) => {
             sala.accionesTurno.has(jugadorSala.socketId)
         )
     ) {
-        eventoRonda = finalizarRondaEnSala(sala, 'jugador-salio');
-    }
-
-    if (resultado.ganador) {
-        io.to(codigo).emit('partida_ganada', construirPartidaGanada(sala));
-
-        if (cantidadAntes === 2) {
-            if (motivo === 'concedio') {
-                conexion.to(codigo).emit('rival_concedio');
-            } else {
-                conexion.to(codigo).emit('rival_desconectado');
-            }
-        } else if (motivo === 'concedio') {
-            conexion.to(codigo).emit('jugador_concedio', eventoSalida);
-        } else {
-            conexion.to(codigo).emit('jugador_desconectado', eventoSalida);
-        }
-    } else if (estabaIniciada && cantidadAntes > 2) {
-        if (motivo === 'concedio') {
-            conexion.to(codigo).emit('jugador_concedio', eventoSalida);
-        } else {
-            conexion.to(codigo).emit('jugador_desconectado', eventoSalida);
-        }
-    }
-
-    if (eventoRonda) {
-        io.to(codigo).emit('ronda_lista', eventoRonda);
+        const eventoRonda = finalizarRondaEnSala(sala, 'jugador-salio');
+        if (eventoRonda) io.to(codigo).emit('ronda_lista', eventoRonda);
     }
 
     emitirSalaActualizada(sala);
@@ -977,12 +1589,19 @@ io.on('connection', (socket) => {
         `Usuario conectado: ${socket.usuario.usuario} (id: ${socket.usuario.idUsuario})`
     );
 
+    reasociarJugadorDesconectado(socket);
+
     socket.on('crear_sala', (datos) => {
         const numeroMapa = normalizarNumeroMapa(datos && datos.numeroMapa);
-        const sala = crearSalaParaSocket(socket, numeroMapa);
+        const sala = crearSalaParaSocket(
+            socket,
+            numeroMapa,
+            datos && datos.modo
+        );
 
         socket.join(sala.codigo);
         socket.emit('sala_creada', sala.codigo);
+        cargarPerfilRanked(sala, sala.jugadores[0]);
         emitirSalaActualizada(sala);
         io.to(sala.codigo).emit('estado_listos', construirEstadoListos(sala));
 
@@ -1011,6 +1630,7 @@ io.on('connection', (socket) => {
         }
 
         socket.join(sala.codigo);
+        cargarPerfilRanked(sala, buscarJugadorEnSala(sala, socket.id));
         emitirSalaActualizada(sala);
         io.to(sala.codigo).emit('estado_listos', construirEstadoListos(sala));
 
@@ -1051,6 +1671,7 @@ io.on('connection', (socket) => {
                 construirPartidaLista(sala, jugador.socketId)
             );
         });
+        registrarPartidaEnBD(sala);
         emitirSalaActualizada(sala);
 
         console.log(
@@ -1066,6 +1687,13 @@ io.on('connection', (socket) => {
             return socket.emit('error_sala', {
                 estado: 'error',
                 mensaje: 'La sala no existe.'
+            });
+        }
+
+        if (sala.iniciada) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'No puedes cambiar tu estado de listo durante la partida.'
             });
         }
 
@@ -1179,10 +1807,14 @@ io.on('connection', (socket) => {
         });
 
         if (resultado.gano) {
-            io.to(codigo).emit(
-                'partida_ganada',
-                construirPartidaGanada(sala)
-            );
+            if (sala.modo === 'ranked') {
+                finalizarYAsentarPartida(sala, 'puntos');
+            } else {
+                io.to(codigo).emit(
+                    'partida_ganada',
+                    construirPartidaGanada(sala)
+                );
+            }
         }
     });
 
@@ -1194,6 +1826,16 @@ io.on('connection', (socket) => {
             return socket.emit('error_sala', {
                 estado: 'error',
                 mensaje: 'La sala no existe.'
+            });
+        }
+
+        if (
+            sala.modo === 'ranked' &&
+            !esTableroValidoParaRanked(datos && datos.tablero)
+        ) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'El tablero de una partida clasificatoria no es válido.'
             });
         }
 
@@ -1224,7 +1866,23 @@ io.on('connection', (socket) => {
     });
 
     socket.on('conceder_partida', (codigoSala) => {
-        manejarSalidaJugador(socket, codigoSala, 'concedio');
+        const sala = buscarSala(obtenerCodigoSala(codigoSala));
+        if (!sala) {
+            return socket.emit('error_sala', {
+                estado: 'error',
+                mensaje: 'La sala no existe.'
+            });
+        }
+
+        if (
+            sala.modo === 'ranked' &&
+            sala.iniciada &&
+            buscarJugadorEnSala(sala, socket.id)
+        ) {
+            return iniciarGraciaDesconexion(socket, sala, 'concedio');
+        }
+
+        manejarSalidaJugador(socket, sala.codigo, 'concedio');
     });
 
     socket.on('disconnect', (motivo) => {
@@ -1233,7 +1891,11 @@ io.on('connection', (socket) => {
         );
 
         salasDelJugador.forEach((sala) => {
-            manejarSalidaJugador(socket, sala.codigo, 'desconectado');
+            if (sala.modo === 'ranked' && sala.iniciada) {
+                iniciarGraciaDesconexion(socket, sala, 'desconectado');
+            } else {
+                manejarSalidaJugador(socket, sala.codigo, 'desconectado');
+            }
         });
 
         console.log(
@@ -1282,3 +1944,9 @@ module.exports.guardarTableroEnSala = guardarTableroEnSala;
 module.exports.construirTablerosActualizados = construirTablerosActualizados;
 module.exports.construirPuntuaciones = construirPuntuaciones;
 module.exports.construirPartidaGanada = construirPartidaGanada;
+module.exports.normalizarModo = normalizarModo;
+module.exports.SEGUNDOS_GRACIA_RANKED = SEGUNDOS_GRACIA_RANKED;
+module.exports.esTableroValidoParaRanked = esTableroValidoParaRanked;
+module.exports.registrarPartidaEnBD = registrarPartidaEnBD;
+module.exports.finalizarYAsentarPartida = finalizarYAsentarPartida;
+module.exports.crearEntradaClasificacion = crearEntradaClasificacion;

@@ -29,14 +29,14 @@ bd.serialize(() => {
 
     // Migrar bases de datos existentes que aún usan la columna "correo"
     bd.all(`PRAGMA table_info(usuarios)`, (error, columnas) => {
-        if (!error && columnas) {
-            const nombresColumnas = columnas.map((columna) => columna.name);
-            if (
-                nombresColumnas.includes('correo') &&
-                !nombresColumnas.includes('usuario')
-            ) {
-                bd.run(`ALTER TABLE usuarios RENAME COLUMN correo TO usuario`);
-            }
+        const nombresColumnas =
+            !error && columnas ? columnas.map((columna) => columna.name) : [];
+        if (
+            nombresColumnas.includes('correo') &&
+            !nombresColumnas.includes('usuario')
+        ) {
+            bd.run(`ALTER TABLE usuarios RENAME COLUMN correo TO usuario`);
+            nombresColumnas.push('usuario');
         }
 
         // Migración opcional: eliminar espacios accidentales de registros antiguos
@@ -64,6 +64,69 @@ bd.serialize(() => {
                 }
             }
         );
+
+        const columnasRanked = [
+            { nombre: 'rp', definicion: 'INTEGER NOT NULL DEFAULT 0' },
+            { nombre: 'partidas_ranked', definicion: 'INTEGER NOT NULL DEFAULT 0' },
+            { nombre: 'victorias_ranked', definicion: 'INTEGER NOT NULL DEFAULT 0' },
+            { nombre: 'derrotas_ranked', definicion: 'INTEGER NOT NULL DEFAULT 0' }
+        ];
+
+        columnasRanked.forEach(({ nombre, definicion }) => {
+            if (!nombresColumnas.includes(nombre)) {
+                bd.run(
+                    `ALTER TABLE usuarios ADD COLUMN ${nombre} ${definicion}`,
+                    (errorColumna) => {
+                        if (errorColumna) {
+                            console.warn(
+                                `No se pudo agregar la columna ${nombre}:`,
+                                errorColumna.message
+                            );
+                        }
+                    }
+                );
+            }
+        });
+
+        bd.run(`
+            CREATE TABLE IF NOT EXISTS partidas (
+                id_partida TEXT PRIMARY KEY,
+                codigo_sala TEXT NOT NULL,
+                numero_mapa INTEGER NOT NULL,
+                iniciada_en TEXT NOT NULL,
+                finalizada_en TEXT,
+                motivo_fin TEXT,
+                asentada INTEGER NOT NULL DEFAULT 0,
+                ganador_id_usuario INTEGER
+            )
+        `);
+
+        bd.run(`
+            CREATE TABLE IF NOT EXISTS partida_jugadores (
+                id_partida TEXT NOT NULL,
+                id_usuario INTEGER NOT NULL,
+                posicion_desde INTEGER NOT NULL,
+                posicion_hasta INTEGER NOT NULL,
+                puesto_mostrado INTEGER NOT NULL,
+                puntuacion INTEGER NOT NULL DEFAULT 0,
+                rp_antes INTEGER NOT NULL DEFAULT 0,
+                rp_delta INTEGER NOT NULL DEFAULT 0,
+                rp_despues INTEGER NOT NULL DEFAULT 0,
+                liga_antes TEXT NOT NULL,
+                liga_despues TEXT NOT NULL,
+                resultado TEXT NOT NULL,
+                PRIMARY KEY (id_partida, id_usuario),
+                FOREIGN KEY (id_partida) REFERENCES partidas(id_partida)
+            )
+        `);
+
+        bd.run(
+            `CREATE INDEX IF NOT EXISTS idx_usuarios_clasificacion ON usuarios(rp DESC, victorias_ranked DESC, id ASC)`
+        );
+        bd.run(
+            `CREATE INDEX IF NOT EXISTS idx_partidas_asentada ON partidas(asentada)`
+        );
+        bd.run(`PRAGMA user_version = 1`);
     });
 });
 
